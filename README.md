@@ -1,7 +1,9 @@
-# EdgePro Power Test Kiti
+# Edge-Pro-Power-Test-Kiti-
+
+Edge Pro Power Test Kiti – ESP32 Feather ile STM32 UART kontrol ve OLED menü.
 
 ## Genel Bakış
-Bu proje, EdgePro Power Test Kiti için geliştirilmiş bir Arduino Mega Mini tabanlı kontrol sistemidir.
+Bu proje, EdgePro Power Test Kiti için geliştirilmiş bir kontrol sistemidir. **Adafruit HUZZAH32 ESP32 Feather** ile STM32’ye UART üzerinden bağlanır; sensör verileri okunur, fan/RGB/fren motoru kontrol edilir, 128x64 OLED ve rotary encoder ile menü kullanılır.
 
 ## Donanım Özellikleri
 
