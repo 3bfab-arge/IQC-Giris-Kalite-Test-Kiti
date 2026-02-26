@@ -304,6 +304,157 @@ Serial1.print("\r\n");
 Serial1.flush();
 ```
 
+### 3.6. Projeksiyon (LED) Kontrolü
+
+ESP32'den STM32'ye gönderilen komutlar:
+
+**LED ON:**
+```text
+$P1\r\n
+```
+
+**LED OFF:**
+```text
+$P0\r\n
+```
+
+**LED Akım Ayarı:**
+```text
+$PCVVV\r\n
+```
+
+**Format Açıklaması:**
+- `$`  - Komut başlangıç karakteri
+- `P1` - Projeksiyon LED **ON** komutu
+- `P0` - Projeksiyon LED **OFF** komutu
+- `PC` - Projeksiyon LED akım ayar komutu
+- `VVV` - Akım değeri (0–1023 arası, sistemde **91–1023** kullanılır)
+- `\r\n` - Satır sonu karakterleri
+
+**Akım Aralığı (Kod Tarafı):**
+- Menüde encoder ile ayarlanan `projeksiyonAkim` değişkeni **91–1023** aralığına clamp edilir.
+- Her encoder adımında akım değeri 10'ar adım değişir; her değişimde:
+
+```cpp
+Serial1.print("$PC");
+Serial1.print(projeksiyonAkim);   // 91–1023
+Serial1.print("\r\n");
+Serial1.flush();
+```
+
+**Notlar:**
+- LED ON/OFF için sadece `$P1\r\n` ve `$P0\r\n` komutları gönderilir, akım ayarı bu komutlardan bağımsızdır.
+- Akım değiştirilirken LED'in açık veya kapalı olması STM32 tarafındaki sürücü tasarımına bağlıdır; tipik kullanımda önce uygun bir akım seviyesi seçilir, ardından `$P1\r\n` ile LED açılır.
+
+### 3.7. Z / Y / CVR Step Motor Kontrolü (Mikrostep)
+
+Z, Y ve iki adet CVR motoru, mikrostep tabanlı bir seri protokol ile kontrol edilir. Tüm komutlarda satır sonu **`\r\n`** ile biter.
+
+#### 3.7.1. Z Motoru Komutları
+
+**Enable / Disable:**
+```text
+$SZE\r\n   // Enable
+$SZD\r\n   // Disable
+```
+
+**Stop:**
+```text
+$SZP\r\n
+```
+
+**Hareket Komutu:**
+```text
+$SZD,MMM,SSS\r\n
+```
+
+**Alanlar:**
+- `$SZ`  - Z motoru hareket komutu prefix'i
+- `D`    - Yön (0 = geri, 1 = ileri)
+- `MMM`  - Mesafe, mikrostep cinsinden (kodda 100–100000 arası, **100'lük adımlarla**)
+- `SSS`  - Hız, mikrostep/s cinsinden (kodda 100–20000 arası, **100'lük adımlarla**)
+
+**Kod Örneği:**
+```cpp
+Serial1.print("$SZ");
+Serial1.print(zMotorDir);            // 0 veya 1
+Serial1.print(",");
+Serial1.print(zMotorDistanceSteps);  // 100–100000
+Serial1.print(",");
+Serial1.print(zMotorSpeedStepsPerS); // 100–20000
+Serial1.print("\r\n");
+Serial1.flush();
+```
+
+#### 3.7.2. Y Motoru Komutları
+
+**Enable / Disable:**
+```text
+$SYE\r\n   // Enable
+$SYD\r\n   // Disable
+```
+
+**Stop:**
+```text
+$SYP\r\n
+```
+
+**Hareket Komutu:**
+```text
+$SYD,MMM,SSS\r\n
+```
+
+**Alanlar ve aralıklar**, Z motoru ile aynıdır:
+- `D` = 0/1 (geri/ileri)
+- `MMM` = 100–100000 mikrostep, 100 adımlı
+- `SSS` = 100–20000 mikrostep/s, 100 adımlı
+
+#### 3.7.3. CVR Motorları (CVR-1 ve CVR-2)
+
+CVR motorları için motor numarası komutun içinde yer alır (`$S1`, `$S2`).
+
+**Enable / Disable:**
+```text
+$S1E\r\n   // CVR-1 Enable
+$S1D\r\n   // CVR-1 Disable
+$S2E\r\n   // CVR-2 Enable
+$S2D\r\n   // CVR-2 Disable
+```
+
+**Stop:**
+```text
+$S1P\r\n   // CVR-1 Stop
+$S2P\r\n   // CVR-2 Stop
+```
+
+**Hareket Komutu:**
+```text
+$SND,MMM,SSS\r\n
+```
+
+**Alanlar:**
+- `$SN` - `N` = 1 veya 2 (CVR-1 veya CVR-2)
+- `D`   - Yön (0 = geri, 1 = ileri)
+- `MMM` - Mesafe, mikrostep cinsinden (100–100000, 100 adımlı)
+- `SSS` - Hız, mikrostep/s cinsinden (100–20000, 100 adımlı)
+
+**Kod Örneği:**
+```cpp
+Serial1.print("$S");
+Serial1.print(motor);                       // 1 veya 2
+Serial1.print(cvrMotorDir[motor]);          // 0 veya 1
+Serial1.print(",");
+Serial1.print(cvrMotorDistanceSteps[motor]);
+Serial1.print(",");
+Serial1.print(cvrMotorSpeedStepsPerS[motor]);
+Serial1.print("\r\n");
+Serial1.flush();
+```
+
+**Notlar:**
+- Z/Y motor menülerinde, hareket komutu gönderilmeden önce motor enable edilmemişse otomatik olarak enable komutu gönderilir ve STM32'nin enable'i işlemesi için kısa bir gecikme uygulanır (yaklaşık **100 ms**).
+- CVR motorlarında enable ardından ekstra gecikme kullanılmaz; STM32 tarafındaki uygulamaya göre ihtiyaç olursa eklenebilir.
+
 ---
 
 ## 4. Veri Değişkenleri
@@ -380,6 +531,19 @@ bool brakeMotorActive = false;     // false: pasif ($B0), true: aktif ($B1)
 | `$LAHHH,SSS,VVV\r\n` | RGB LED HSV ayarla | ESP32 | STM32 | `$LA` + Hue + `,` + Sat + `,` + Val + `\r\n` |
 | `$B0\r\n` | Fren motorunu pasif yap | ESP32 | STM32 | `$B0\r\n` |
 | `$B1\r\n` | Fren motorunu aktif yap | ESP32 | STM32 | `$B1\r\n` |
+| `$P1\r\n` | Projeksiyon LED ON | ESP32 | STM32 | `$P1\r\n` |
+| `$P0\r\n` | Projeksiyon LED OFF | ESP32 | STM32 | `$P0\r\n` |
+| `$PCVVV\r\n` | Projeksiyon LED akımını ayarla | ESP32 | STM32 | `$PC` + akım (0–1023, sistemde 91–1023) + `\r\n` |
+| `$SZE\r\n` / `$SZD\r\n` | Z motoru enable / disable | ESP32 | STM32 | `$SZE\r\n` veya `$SZD\r\n` |
+| `$SZP\r\n` | Z motorunu durdur | ESP32 | STM32 | `$SZP\r\n` |
+| `$SZD,MMM,SSS\r\n` | Z motorunu mikrostep ile hareket ettir | ESP32 | STM32 | `$SZ` + yön + `,` + mesafe + `,` + hız + `\r\n` |
+| `$SYE\r\n` / `$SYD\r\n` | Y motoru enable / disable | ESP32 | STM32 | `$SYE\r\n` veya `$SYD\r\n` |
+| `$SYP\r\n` | Y motorunu durdur | ESP32 | STM32 | `$SYP\r\n` |
+| `$SYD,MMM,SSS\r\n` | Y motorunu mikrostep ile hareket ettir | ESP32 | STM32 | `$SY` + yön + `,` + mesafe + `,` + hız + `\r\n` |
+| `$S1E\r\n` / `$S1D\r\n` | CVR-1 motoru enable / disable | ESP32 | STM32 | `$S1E\r\n` veya `$S1D\r\n` |
+| `$S2E\r\n` / `$S2D\r\n` | CVR-2 motoru enable / disable | ESP32 | STM32 | `$S2E\r\n` veya `$S2D\r\n` |
+| `$S1P\r\n` / `$S2P\r\n` | CVR-1 / CVR-2 motorlarını durdur | ESP32 | STM32 | `$S1P\r\n` veya `$S2P\r\n` |
+| `$SND,MMM,SSS\r\n` | CVR-1/2 motorlarını mikrostep ile hareket ettir | ESP32 | STM32 | `$S` + motorNo (1/2) + yön + `,` + mesafe + `,` + hız + `\r\n` |
 | `$VAL1,...,VAL15\r\n` | Sensör verileri (15 değer) | STM32 | ESP32 | `$` + virgülle ayrılmış değerler + `\r\n` |
 
 ---
@@ -612,6 +776,10 @@ Brake Motor: $B0  (Pasif)
 9. **CVR1 Ref** - CVR1 TMC Status Stop Right ve Left durumlarını gösterir
 10. **CVR2 Ref** - CVR2 TMC Status Stop Right ve Left durumlarını gösterir
 11. **BRAKE MOTOR** - Fren motorunu kontrol eder (Aktif/Pasif)
+12. **Z Motor** - Z step motorunu mikrostep ile kontrol eder (enable/disable/stop/hareket)
+13. **Y Motor** - Y step motorunu mikrostep ile kontrol eder (enable/disable/stop/hareket)
+14. **CVR Motor** - CVR-1 / CVR-2 step motorlarını mikrostep ile kontrol eder (motor seçimi + enable/disable/stop/hareket)
+15. **Projeksiyon** - Projeksiyon LED aç/kapa ve akım ayarı (91–1023)
 
 ### 11.2. TMC Ref Ekranları
 - **Durum Gösterimi:** Merkezde büyük fontla "BASILI" veya "BASILI DEGIL"
@@ -633,15 +801,50 @@ Brake Motor: $B0  (Pasif)
 - **Başlangıç:** Menüye girildiğinde durum pasif (false) ile başlar
 - **Ekran Güncelleme:** Encoder hareket ettiğinde ekran anında güncellenir
 
+### 11.4. Z / Y / CVR Motor Ekranları (Mikrostep)
+
+- **Başlıklar:** "Z Motor", "Y Motor", "CVR Motor"
+- **Parametreler (Z/Y):**
+  - Durum (Enable/Disable) → `$SZE`/`$SZD` veya `$SYE`/`$SYD`
+  - Yön (0/1 → geri/ileri) → hareket komutu içinde `D`
+  - Mesafe (mikrostep): 100–100000, 100'lük adımlarla → `MMM`
+  - Hız (mikrostep/s): 100–20000, 100'lük adımlarla → `SSS`
+  - Hareket satırında butona basınca `$SZD,MMM,SSS\r\n` veya `$SYD,MMM,SSS\r\n` gönderilir.
+- **Parametreler (CVR):**
+  - Motor seçimi: 1 veya 2 (CVR-1 / CVR-2) → komut prefix'i `$S1` veya `$S2`
+  - Enable/Disable: `$S1E`/`$S1D`, `$S2E`/`$S2D`
+  - Stop: `$S1P` / `$S2P`
+  - Hareket: `$SND,MMM,SSS\r\n` formatında (N=1/2, D=0/1, mesafe/hız Z/Y ile aynı aralıklarda)
+- **Encoder:**
+  - Satır seçimi ve değer ayarı modları arasında geçiş yapılır.
+  - Mesafe ve hızda her encoder adımı 100 mikrostep / 100 mikrostep/s değişim yapar.
+- **Buton:**
+  - Durum satırında: enable/disable komutu gönderilir (gerekirse önce stop).
+  - Hareket satırında: enable değilse önce enable, ardından hareket komutu gönderilir.
+  - "Geri" satırında: ana menüye dönüş.
+
+### 11.5. Projeksiyon (LED) Ekranı
+
+- **Başlık:** "Projeksiyon (LED)"
+- **Satırlar:**
+  - Durum: "ACIK" / "KAPALI" (buton ile `$P1\r\n` veya `$P0\r\n` gönderilir)
+  - Akım: 91–1023 arası değer, encoder ile 10'ar adımlarla değiştirilir ve her değişimde `$PCVVV\r\n` gönderilir.
+  - Geri: Buton ile ana menüye dönüş.
+- **Not:** Kod tarafında alt limit 91'e clamp edildiği için `$PCVVV` komutlarında 0–90 aralığı kullanılmaz.
+
 ---
 
 ## 12. Versiyon Bilgisi
 
-- **Protokol Versiyonu:** 2.1
+- **Protokol Versiyonu:** 2.2
 - **Son Güncelleme:** 2026-01-30
 - **ESP32 Kart:** Adafruit HUZZAH32 Feather
 - **STM32:** (Kart modeli belirtilmeli)
-- **Yeni Özellikler (v2.1):**
+- **Yeni Özellikler (v2.2):**
+  - Z / Y / CVR step motor komutları ($SZE/$SZD/$SZP, $SZD,MMM,SSS; $SYE/$SYD/$SYP, $SYD,MMM,SSS; $S1E/$S1D/$S1P, $S2E/$S2D/$S2P, $SND,MMM,SSS)
+  - Projeksiyon (LED) komutları ve menüsü ($P1/$P0/$PCVVV, alt limit 91)
+  - Menü dokümantasyonuna Z/Y/CVR Motor ve Projeksiyon ekranlarının eklenmesi
+- **Önceki Özellikler (v2.1):**
   - Fren motoru kontrolü ($B0/$B1)
   - BRAKE MOTOR menü öğesi eklendi
 - **Önceki Özellikler (v2.0):**
