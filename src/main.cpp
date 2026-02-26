@@ -35,14 +35,15 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Encoder Pinleri - Rotary Encoder KY-040 veya benzeri
-// Bağlantı: Encoder CLK -> Feather D23 (GPIO 23)
-//           Encoder DT  -> Feather D12 (GPIO 12)
-//           Encoder SW  -> Feather D27 (GPIO 27)
-//           Encoder VCC -> 3.3V
-//           Encoder GND -> GND
-#define ENCODER_CLK 33  // CLK pini (D23, GPIO 23)
-#define ENCODER_DT 12   // DT pini (D12, GPIO 12)
-#define ENCODER_SW 27   // Buton pini (D27, GPIO 27)
+// Yeni bağlantı (I2C hatlarından UZAK):
+//   Encoder CLK -> Feather D32 (GPIO 32)
+//   Encoder DT  -> Feather D33 (GPIO 33)
+//   Encoder SW  -> Feather D27 (GPIO 27)
+//   Encoder VCC -> 3.3V
+//   Encoder GND -> GND
+#define ENCODER_CLK 32  // CLK pini (GPIO 32)
+#define ENCODER_DT 33   // DT pini  (GPIO 33)
+#define ENCODER_SW 27   // Buton pini (GPIO 27)
 
 // Gesture sensor degerleri
 #define GESTURE_NONE  0
@@ -98,21 +99,21 @@ enum MenuState {
 MenuState currentMenu = MENU_MAIN;
 int menuSelection = 0; // 0-14 arasi menü seçimi
 const char* menuItems[] = {
-  "IR Temp Sensor",
+  "IR Temp. Sensor",
   "NTC",
-  "INTAKE FAN",
-  "EXHAUST FAN",
+  "Intake Fan",
+  "Exhaust Fan",
   "RGB LED",
   "Gesture Sensor",
-  "Z Ref",
-  "Y Ref",
-  "CVR1 Ref",
-  "CVR2 Ref",
-  "BRAKE MOTOR",
+  "Z Ref.",
+  "Y Ref.",
+  "CVR1 Ref.",
+  "CVR2 Ref.",
+  "Brake Motor",
   "Z Motor",
   "Y Motor",
-  "CVR Motor",
-  "Projeksiyon"
+  "CVR 1-2 Motor",
+  "Projection"
 };
 const int menuItemCount = 15;
 bool screenNeedsUpdate = true;
@@ -213,6 +214,7 @@ void drawHeader(const char* title);
 void drawProgressBar(int x, int y, int width, int percent);
 void drawCenteredText(int y, const char* text, int textSize = 2);
 void drawStatusScreen(const char* title, const char* statusText, bool isActive);
+void showStartupScreen();
 
 void setup() {
   // OLED Ekran baslat (Serial'den once, hizli baslat)
@@ -224,7 +226,10 @@ void setup() {
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.display(); // Ekrani hemen aktif et
+    display.display(); // Ekrani hemen aktif et (bos ekran)
+
+    // Ilk olarak acilis ekranini goster (5 sn)
+    showStartupScreen();
   }
 
   // Serial baslat (non-blocking)
@@ -245,14 +250,16 @@ void setup() {
   lastCLK = digitalRead(ENCODER_CLK);
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), encoderISR, CHANGE);
   
-  // Menu'yu hemen goster ve ekrani aktif et
-  drawMenu();
-  display.display(); // Ekrani kesinlikle goster
-  
   // Ilk veriyi al
   delay(200);
   readSTM32Data();
   lastRead = millis();
+
+  // Kurulum tamamlandiktan sonra ana menuyu hazirla ve goster
+  currentMenu = MENU_MAIN;
+  menuSelection = 0;
+  drawMenu();
+  display.display();
 }
 
 // STM32'den veri oku ve parse et
@@ -453,6 +460,19 @@ void drawStatusScreen(const char* title, const char* statusText, bool isActive) 
   display.print(isActive ? "AKTIF" : "PASIF");
   
   display.display();
+}
+
+void showStartupScreen() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // Ust satir: "IQC Giris Kalite"
+  drawCenteredText(24, "IQC Giris Kalite", 1);
+  // Alt satir: "(Test Kiti)"
+  drawCenteredText(36, "Test Kiti", 1);
+
+  display.display();
+  delay(5000); // Ilk acilista 5 saniye bekle
 }
 
 // Menu cizme fonksiyonlari
