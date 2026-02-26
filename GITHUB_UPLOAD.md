@@ -1,6 +1,6 @@
 # GitHub'a Yükleme
 
-Repo adı: **Edge-Pro-Power-Test-Kiti-**
+Repo adı: **IQC-Giris-Kalite-Test-Kiti-**
 
 ## Yöntem 1: Script ile (en kolay)
 
@@ -22,7 +22,7 @@ Repo adı: **Edge-Pro-Power-Test-Kiti-**
 `KULLANICI_ADINIZ` yerine **kendi GitHub kullanıcı adınızı** yazın.
 
 ```bash
-git remote add origin https://github.com/KULLANICI_ADINIZ/Edge-Pro-Power-Test-Kiti-.git
+git remote add origin https://github.com/KULLANICI_ADINIZ/IQC-Giris-Kalite-Test-Kiti-.git
 git push -u origin main
 ```
 

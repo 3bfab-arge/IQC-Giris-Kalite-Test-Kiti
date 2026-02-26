@@ -1,8 +1,8 @@
-# Edge-Pro-Power-Test-Kiti- GitHub'a yukle
+# IQC-Giris-Kalite-Test-Kiti- GitHub'a yukle
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-$repo = "Edge-Pro-Power-Test-Kiti-"
+$repo = "IQC-Giris-Kalite-Test-Kiti-"
 
 # Remote var mi?
 $origin = git remote get-url origin 2>$null

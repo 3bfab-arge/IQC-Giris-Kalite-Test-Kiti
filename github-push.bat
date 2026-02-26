@@ -3,7 +3,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 echo ========================================
-echo  Edge-Pro-Power-Test-Kiti- GitHub Push
+echo  IQC-Giris-Kalite-Test-Kiti- GitHub Push
 echo ========================================
 echo.
 
@@ -18,7 +18,7 @@ git add .
 echo.
 
 echo Commit yapiliyor...
-git commit -m "EdgePro Power Test Kiti - ESP32 Feather, STM32 UART, OLED, Encoder menu"
+git commit -m "IQC Giris Kalite Test Kiti - ESP32 Feather, STM32 UART, OLED, Encoder menu"
 if errorlevel 1 (
     echo Uyari: Commit atlandi - degisiklik yok veya zaten commit edildi.
 )
@@ -30,7 +30,7 @@ echo Remote kontrol ediliyor...
 git remote show origin >nul 2>&1
 if errorlevel 1 (
     set /p GITHUB_USER="GitHub kullanici adinizi girin: "
-    git remote add origin https://github.com/%GITHUB_USER%/Edge-Pro-Power-Test-Kiti-.git
+    git remote add origin https://github.com/%GITHUB_USER%/IQC-Giris-Kalite-Test-Kiti-.git
     echo Remote eklendi.
 ) else (
     echo Remote zaten var: origin

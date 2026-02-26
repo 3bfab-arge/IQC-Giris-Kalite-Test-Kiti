@@ -1,6 +1,6 @@
-# Edge-Pro-Power-Test-Kiti-
+# IQC Giriş Kalite Test Kiti
 
-Edge Pro Power Test Kiti için **ESP32 Feather** tabanlı kontrol ve izleme arayüzü. STM32 ile UART üzerinden haberleşir; sensör verilerini okur, fan/RGB/fren motorunu komutlar, 128x64 OLED ve rotary encoder ile menü sunar.
+IQC Giriş Kalite Test Kiti için **ESP32 Feather** tabanlı kontrol ve izleme arayüzü. STM32 ile UART üzerinden haberleşir; sensör verilerini okur, fan/RGB/fren motorunu komutlar, 128x64 OLED ve rotary encoder ile menü sunar.
 
 ---
 

@@ -1,6 +1,6 @@
 # Pin Bağlantıları
 
-Bu dosya **Edge Pro Power Test Kiti** projesinde kullanılan kartların pin tanımlarını ve bağlantılarını açıklar. Ana kontrol kartı **Adafruit HUZZAH32 ESP32 Feather**’dır; sensör ve çıkışlar **STM32** tarafında olup ESP32 ile UART üzerinden haberleşir.
+Bu dosya **IQC Giriş Kalite Test Kiti** projesinde kullanılan kartların pin tanımlarını ve bağlantılarını açıklar. Ana kontrol kartı **Adafruit HUZZAH32 ESP32 Feather**’dır; sensör ve çıkışlar **STM32** tarafında olup ESP32 ile UART üzerinden haberleşir.
 
 ---
 
