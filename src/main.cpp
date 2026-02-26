@@ -26,6 +26,10 @@
 #define GESTURE_LOOP_DELAY_MS 2 // Gesture ekranindayken daha hizli dongu
 #define SCREEN_UPDATE_MS   50   // OLED yenileme araligi (ms)
 #define GESTURE_SCREEN_MS  30   // Gesture ekraninda daha sik yenile
+// NTC test ozel parametreleri
+#define NTC_SAMPLE_COUNT        20   // NTC testi icin alinacak olcum sayisi
+#define NTC_SAMPLE_INTERVAL_MS  100  // NTC testi sirasinda olcumler arasi bekleme (ms)
+#define NTC_TEST_TIMEOUT_MS    5000  // NTC testi max sure (ms), asilirsa FAIL
 
 // OLED Ekran - 128x64, I2C
 #define SCREEN_WIDTH 128
@@ -168,6 +172,15 @@ bool projeksiyonLedOn = false;       // $P1 ON / $P0 OFF
 int  projeksiyonAkim = 512;          // 91-1023, $PC<deger>
 int  projeksiyonParamSelection = 0;  // 0: Durum, 1: Akim, 2: Geri
 bool projeksiyonEditMode = false;    // false: satir secimi, true: akim ayarlama
+
+// NTC test menusu durum degiskenleri
+bool  ntcTestRunning   = false;  // true iken 100 olcum toplanir
+int   ntcSampleCount   = 0;      // kac olcum alindi
+float ntcSampleSum     = 0.0f;   // olcumlerin toplami
+float ntcAverageTemp   = 0.0f;   // hesaplanan ortalama sicaklik
+bool  ntcHasResult     = false;  // test tamamlandi mi
+bool  ntcStatusSuccess = false;  // true: SUCCESS, false: FAIL
+unsigned long ntcTestStartTime = 0; // testi baslatma zamani (ms)
 
 static unsigned long lastRead = 0;
 static unsigned long lastButtonPress = 0;
@@ -325,13 +338,34 @@ void readSTM32Data() {
     values[valueIndex++] = numValue;
   }
   
-  // En az 4 sayi varsa guncelle (geri uyumluluk icin)
+  // En az 4 sayi varsa tum sensörleri guncelle
   if (valueIndex >= 4) {
-    mcu_load_raw = values[0] / 10.0;
-    pcb_temp_raw = values[1] / 10.0;
+    mcu_load_raw   = values[0] / 10.0;
+    pcb_temp_raw   = values[1] / 10.0;
     plate_temp_raw = values[2] / 10.0;
     resin_temp_raw = values[3] / 10.0;
-    
+
+    // NTC menusu icin 20 olcumluk test toplama (yalnizca plate_temp_raw kullanilir)
+    if (currentMenu == MENU_NTC && ntcTestRunning) {
+      // Aralik disi deger gorursek direkt FAIL
+      if (plate_temp_raw < 0.0f || plate_temp_raw > 100.0f) {
+        ntcTestRunning   = false;
+        ntcHasResult     = true;
+        ntcStatusSuccess = false;
+      } else {
+        ntcSampleSum   += plate_temp_raw;
+        ntcSampleCount += 1;
+        if (ntcSampleCount >= NTC_SAMPLE_COUNT) {
+          ntcAverageTemp   = ntcSampleSum / ntcSampleCount;
+          ntcStatusSuccess = (ntcAverageTemp >= 0.0f && ntcAverageTemp <= 100.0f);
+          ntcHasResult     = true;
+          ntcTestRunning   = false;
+        }
+      }
+      // Test surecinde/bitince ekrani guncelle
+      drawNTCScreen();
+    }
+
     if (valueIndex >= 7) {
       intake1_fan_raw = values[4] / 10.0;
       intake2_fan_raw = values[5] / 10.0;
@@ -534,18 +568,39 @@ void drawIRTempScreen() {
 
 void drawNTCScreen() {
   display.clearDisplay();
-  drawHeader("NTC Temperature");
-  
-  // Deger ortada büyük fontla
-  char tempStr[16];
-  snprintf(tempStr, sizeof(tempStr), "%.1f C", plate_temp_raw);
-  drawCenteredText(28, tempStr, 2);
-  
-  // Alt bilgi
+  // Ustte "NTC Test" basligini ortala
+  drawCenteredText(0, "NTC Test", 1);
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
   display.setTextSize(1);
-  display.setCursor(0, 52);
-  display.print("Plate Temp");
-  
+  display.setCursor(0, 16);
+  display.print("Durum: ");
+  if (ntcTestRunning) {
+    display.print("TESTING");
+  } else if (ntcHasResult) {
+    display.print(ntcStatusSuccess ? "SUCCESS" : "FAIL");
+  } else {
+    display.print("BEKLEME");
+  }
+
+  display.setCursor(0, 28);
+  display.print("Deger: ");
+  if (ntcHasResult) {
+    char tempStr[16];
+    snprintf(tempStr, sizeof(tempStr), "%.1f C", ntcAverageTemp);
+    display.print(tempStr);
+  } else {
+    display.print("--.- C");
+  }
+
+  if (ntcTestRunning) {
+    drawCenteredText(44, "Olcum yapiliyor...", 1);
+  } else if (ntcHasResult) {
+    drawCenteredText(44, "Geri icin tikla", 1);
+  } else {
+    drawCenteredText(44, "Test icin tikla", 1);
+  }
+
   display.display();
 }
 
@@ -1392,6 +1447,14 @@ void updateMenu() {
         drawIRTempScreen();
       } else if (menuSelection == 1) {
         currentMenu = MENU_NTC;
+        // NTC test durumunu sifirla
+        ntcTestRunning   = false;
+        ntcSampleCount   = 0;
+        ntcSampleSum     = 0.0f;
+        ntcAverageTemp   = 0.0f;
+        ntcHasResult     = false;
+        ntcStatusSuccess = false;
+        ntcTestStartTime = 0;
         drawNTCScreen();
       } else if (menuSelection == 2) {
         currentMenu = MENU_INTAKE_FAN;
@@ -1489,6 +1552,25 @@ void updateMenu() {
         lastEncoderPos = 0;
         drawProjeksiyonScreen();
       }
+    } else if (currentMenu == MENU_NTC) {
+      // NTC menusu: buton islemleri
+      if (!ntcTestRunning && !ntcHasResult) {
+        // Testi baslat
+        ntcTestRunning   = true;
+        ntcSampleCount   = 0;
+        ntcSampleSum     = 0.0f;
+        ntcAverageTemp   = 0.0f;
+        ntcStatusSuccess = false;
+        ntcTestStartTime = millis();
+        drawNTCScreen();
+      } else if (!ntcTestRunning && ntcHasResult) {
+        // Sonuc gorundukten sonra butona basinca ana menuye don
+        ntcHasResult   = false;
+        ntcAverageTemp = 0.0f;
+        currentMenu    = MENU_MAIN;
+        drawMenu();
+      }
+      screenNeedsUpdate = false;
     } else if (currentMenu == MENU_INTAKE_FAN) {
       // Butona basinca ana menuye don
       currentMenu = MENU_MAIN;
@@ -1723,8 +1805,16 @@ void loop() {
   
   unsigned long now = millis();
   
-  // Sensör verisi: Gesture ekranindayken daha sik istek (GESTURE_READ_MS), degilse READ_INTERVAL_MS
-  unsigned long readInterval = (currentMenu == MENU_GESTURE) ? GESTURE_READ_MS : READ_INTERVAL_MS;
+  // Sensör verisi: Gesture ekranindayken daha sik istek,
+  // NTC testi sirasinda daha seyrek (100ms), diger durumlarda standart READ_INTERVAL_MS
+  unsigned long readInterval;
+  if (currentMenu == MENU_GESTURE) {
+    readInterval = GESTURE_READ_MS;
+  } else if (currentMenu == MENU_NTC && ntcTestRunning) {
+    readInterval = NTC_SAMPLE_INTERVAL_MS;
+  } else {
+    readInterval = READ_INTERVAL_MS;
+  }
   if (now - lastRead >= readInterval) {
     lastRead = now;
     readSTM32Data();
@@ -1740,6 +1830,26 @@ void loop() {
   if (now - lastScreenUpdate >= screenUpdateInterval) {
     lastScreenUpdate = now;
     drawCurrentScreen();
+  }
+
+  // NTC testi icin timeout kontrolu:
+  // Belirli sure icinde yeterli olcum gelmezse eldeki orneklerle ortalama al,
+  // aralik disina cikarsa veya hic ornek yoksa FAIL olarak sonlandir.
+  if (currentMenu == MENU_NTC && ntcTestRunning && ntcTestStartTime > 0) {
+    if (now - ntcTestStartTime > NTC_TEST_TIMEOUT_MS) {
+      ntcTestRunning = false;
+      ntcHasResult   = true;
+
+      if (ntcSampleCount > 0) {
+        ntcAverageTemp = ntcSampleSum / ntcSampleCount;
+        ntcStatusSuccess = (ntcAverageTemp >= 0.0f && ntcAverageTemp <= 100.0f);
+      } else {
+        ntcAverageTemp   = 0.0f;
+        ntcStatusSuccess = false;
+      }
+
+      drawNTCScreen();
+    }
   }
   
   delay(LOOP_DELAY_MS);
