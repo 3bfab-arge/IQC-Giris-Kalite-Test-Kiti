@@ -1,292 +1,168 @@
 # Edge-Pro-Power-Test-Kiti-
 
-Edge Pro Power Test Kiti – ESP32 Feather ile STM32 UART kontrol ve OLED menü.
+Edge Pro Power Test Kiti için **ESP32 Feather** tabanlı kontrol ve izleme arayüzü. STM32 ile UART üzerinden haberleşir; sensör verilerini okur, fan/RGB/fren motorunu komutlar, 128x64 OLED ve rotary encoder ile menü sunar.
+
+---
+
+## İçindekiler
+
+- [Genel Bakış](#genel-bakış)
+- [Donanım](#donanım)
+- [Yazılım Mimarisi (Ana Kod)](#yazılım-mimarisi-ana-kod)
+- [Menü Sistemi](#menü-sistemi)
+- [Proje Yapısı ve Dokümantasyon](#proje-yapısı-ve-dokümantasyon)
+- [Derleme ve Yükleme](#derleme-ve-yükleme)
+
+---
 
 ## Genel Bakış
-Bu proje, EdgePro Power Test Kiti için geliştirilmiş bir kontrol sistemidir. **Adafruit HUZZAH32 ESP32 Feather** ile STM32’ye UART üzerinden bağlanır; sensör verileri okunur, fan/RGB/fren motoru kontrol edilir, 128x64 OLED ve rotary encoder ile menü kullanılır.
 
-## Donanım Özellikleri
+| Özellik | Açıklama |
+|--------|----------|
+| **Kart** | Adafruit HUZZAH32 ESP32 Feather |
+| **Haberleşme** | UART (Serial1) ile STM32 – 115200, 8N1 |
+| **Ekran** | 128x64 monokrom OLED (I2C, SSD1306, 0x3C) |
+| **Kontrol** | Rotary encoder (döndürme + buton) |
+| **Veri kaynağı** | Tüm sensör/fan/TMC verileri STM32’den `$A` komutu ile alınır |
+| **Kontrol komutları** | Fan hızı (`$F1`, `$F2`, `$F3`), RGB LED (`$LA`), Fren motoru (`$B0`/`$B1`) |
 
-### Mikrodenetleyici
-- **Kart**: Arduino Mega Mini
-- **Mikroişlemci**: ATmega2560
-- **Platform**: PlatformIO
+ESP32, kullanıcı arayüzünü (OLED + encoder) yönetir; sensör ölçümü, fan sürme ve TMC okuma STM32 tarafında yapılır. Protokol detayı için **SERI_HABERLESME.md** kullanılır.
 
-### Bağlantılar
+---
 
-#### NTC Sıcaklık Sensörü
-- **Pin**: A0 (Analog Giriş)
-- **Açıklama**: NTC (Negative Temperature Coefficient) sıcaklık sensörü analog olarak okunur
-- **Kullanım**: Sıcaklık ölçümü için analog değer okunur ve sıcaklığa dönüştürülür
+## Donanım
 
-#### DS18B20 Sıcaklık Sensörü
-- **Pin**: D4 (Dijital Giriş - OneWire)
-- **Açıklama**: DS18B20 dijital sıcaklık sensörü OneWire protokolü ile çalışır
-- **Kullanım**: DallasTemperature kütüphanesi ile sıcaklık okunur
-- **Kütüphaneler**: OneWire, DallasTemperature
-- **Not**: 4.7kΩ pull-up direnci gerekebilir (VCC ile DATA arası)
+### Kullanılan Kart: Adafruit HUZZAH32 ESP32 Feather
 
-#### RGB LED
-- **Kırmızı Pin**: D9 (PWM Çıkış)
-- **Yeşil Pin**: D10 (PWM Çıkış)
-- **Mavi Pin**: D11 (PWM Çıkış)
-- **Güç Kaynağı**: 12V harici güç kaynağı
-- **Açıklama**: RGB LED PWM sinyalleri ile kontrol edilir
-- **Kullanım**: `analogWrite()` fonksiyonu ile 0-255 arası değerler verilerek renk kontrolü yapılır
-- **Başlangıç Durumu**: Tüm kanallar 0 (kapalı)
-- **Not**: 12V güç kaynağı harici olarak bağlanmalıdır
+- **MCU:** ESP32 (WiFi/Bluetooth kapalı, sadece UART + I2C + GPIO)
+- **Framework:** Arduino (PlatformIO, `featheresp32`)
 
-#### Rotary Encoder
-- **DT Pin**: D22 (Dijital Giriş - INPUT_PULLUP)
-- **CLK Pin**: D23 (Dijital Giriş - INPUT_PULLUP)
-- **SW Pin**: D26 (Dijital Giriş - INPUT_PULLUP)
-- **Açıklama**: Rotary encoder döndürme ve buton basma işlemleri için kullanılır
-- **Kullanım**: DT ve CLK pinleri ile döndürme yönü tespit edilir, SW pini ile buton durumu okunur
-- **Pull-up**: Tüm pinler INPUT_PULLUP modunda yapılandırılmıştır
-- **Not**: Encoder okuma için interrupt veya polling yöntemi kullanılabilir
+### Pin Özeti (ESP32 Feather)
 
-#### Buzzer
-- **Pin**: D12 (PWM Çıkış)
-- **Açıklama**: Sesli uyarı ve bildirimler için buzzer
-- **Kullanım**: `digitalWrite()` ile basit bip sesi veya `tone()` fonksiyonu ile farklı frekanslarda ses üretilebilir
-- **Başlangıç Durumu**: LOW (kapalı)
-- **Not**: PWM pin olduğu için farklı tonlar üretilebilir
+| İşlev | GPIO | Açıklama |
+|-------|------|----------|
+| **UART (STM32)** | RX = 16, TX = 17 | STM32 TX → 16, STM32 RX → 17, GND ortak |
+| **OLED (I2C)** | SDA/SCL (donanım I2C) | 128x64 SSD1306, adres 0x3C |
+| **Encoder CLK** | 33 | Rotary encoder saat pini |
+| **Encoder DT** | 12 | Rotary encoder veri pini |
+| **Encoder SW** | 27 | Encoder butonu (menü seç / geri) |
 
-#### Buton
-- **Pin**: D32 (Dijital Giriş - INPUT_PULLUP)
-- **Açıklama**: Buton basma algılama için kullanılır
-- **Bağlantı**: Pull-up bağlantılı (harici pull-up direnci mevcut)
-- **Kullanım**: `digitalRead()` ile okunur, basıldığında LOW, basılmadığında HIGH değer döner
-- **Not**: Debounce işlemi yapılması önerilir
+Bağlantı detayları ve voltaj uyumu için **PIN_BAGLANTILARI.md** dosyasına bakın.
 
-#### OLED 1.3 inç Ekran (SH1106)
-- **SDA Pin**: D20 (I2C Data - Arduino Mega I2C)
-- **SCL Pin**: D21 (I2C Clock - Arduino Mega I2C)
-- **Protokol**: I2C
-- **Çözünürlük**: 128x64 piksel
-- **Sürücü**: SH1106
-- **I2C Adresi**: 0x3C veya 0x3D
-- **Açıklama**: 1.3 inç monokrom OLED ekran, SH1106 sürücüsü ile çalışır
-- **Kütüphaneler**: Adafruit GFX Library, Adafruit SH110X
-- **Not**: Arduino Mega'da I2C pinleri otomatik olarak SDA=20, SCL=21'dir. Reset pin yoksa OLED_RESET=-1 kullanılır.
+---
 
-#### ST7789 TFT Ekran (Eski - Artık Kullanılmıyor)
-- **CS Pin**: D53 (Dijital Çıkış)
-- **DC Pin**: D48 (Dijital Çıkış)
-- **RES Pin**: D49 (Dijital Çıkış)
-- **SDA Pin**: D24 (Dijital Çıkış – Software SPI veri)
-- **SCL Pin**: D25 (Dijital Çıkış – Software SPI saat)
-- **Protokol**: Software SPI (ekran TMC2130 ile pin çakışmasın diye D51/D52 kullanılmıyor)
-- **Açıklama**: ST7789 TFT ekran kontrolcüsü ile çalışan ekran (artık kullanılmıyor, yerine OLED kullanılıyor)
-- **Kütüphaneler**: Adafruit GFX Library, Adafruit ST7735 and ST7789 Library
-- **Not**: Eski bağlantı (sadece ekran varken) SDA=D51, SCL=D52 idi; TMC2130 eklendiği için ekran SDA/SCL D24/D25’e taşındı (aşağıda açıklama).
+## Yazılım Mimarisi (Ana Kod)
 
-#### TMC2130 Step Motor Sürücü
-- **DIR Pin**: D44 (Yön)
-- **STEP Pin**: D45 (Adım)
-- **EN Pin**: D46 (Enable, LOW = motor açık)
-- **CS Pin**: D47 (SPI Chip Select)
-- **SPI**: MISO=D50, MOSI=D51, SCK=D52 (donanım SPI, ekran ile paylaşılmıyor)
-- **Açıklama**: Trinamic TMC2130 step motor sürücü; SPI ile ayar, STEP/DIR ile hareket
+Kaynak: **`src/main.cpp`**
 
-#### Brake Çıkışı
-- **Pin**: D35 (Dijital Çıkış)
-- **Açıklama**: Fren/brake kontrolü için dijital çıkış pini
-- **Kullanım**: HIGH/LOW durumları ile brake kontrolü yapılır
-- **Başlangıç Durumu**: LOW (kapalı)
+### Başlangıç: `setup()`
 
-#### Fanlar (25 kHz PWM + TACH)
-- **PWM (Timer3, 25 kHz)**: Intake=D5, Exhaust=D2, H4=D3
-- **TACH (RPM geri bildirimi)**: Intake=D24, Exhaust=D25, H4=D27 (INPUT_PULLUP)
-- **Kullanım**: Menüden hangi fana tıklanırsa o fan aktif; encoder ile %10 kademe (0–100%); ekranda PWM % ve RPM gösterilir
-- **Not**: 4-pin fan standardı 25 kHz PWM; TACH tipik 2 darbe/devir
+1. **I2C ve OLED:** `Wire.begin()` → `display.begin()` (SSD1306, 0x3C) → ilk çerçeve çizilir.
+2. **Serial:** Debug için `Serial` 115200.
+3. **UART:** `Serial1.setPins(16, 17)`, `Serial1.begin(115200)`, buffer temizlenir.
+4. **Encoder:** CLK/DT/SW pinleri `INPUT_PULLUP`; CLK için `attachInterrupt` ile `encoderISR` (encoderPos artır/azalt).
+5. **İlk ekran:** `drawMenu()` ile ana menü gösterilir.
+6. **İlk veri:** Kısa gecikme sonrası `readSTM32Data()` bir kez çağrılır, `lastRead` ayarlanır.
 
-#### Diwell DTP-UART-H04 IR Sıcaklık Sensörü
-- **UART**: Serial3 (Arduino Mega TX3=D14, RX3=D15)
-- **Baud**: 19200, 8N1
-- **Bağlantı**: Sensör TX → Mega RX3 (D15), Sensör RX → Mega TX3 (D14), GND, VCC
-- **Kullanım**: Menüden "IR temp. sens." seçilir; ekranda obje ve ortam (iç) sıcaklığı gösterilir; OK ile çıkış
-- **Protokol**: Sorgu 4 byte (0x11 0x03 0x01 0x98), yanıt 8 byte (0x16 0x04 + obje 2B + ortam 2B + CRC + 0x9C), sıcaklık = 16 bit / 10 (°C)
+### Ana Döngü: `loop()`
 
-#### DFPlayer Mini (Speakers)
-- **UART**: Serial2 (Arduino Mega TX2=D16, RX2=D17)
-- **Baud**: 9600, 8N1
-- **Bağlantı**: DFPlayer RX → Mega TX2 (D16), DFPlayer TX → Mega RX2 (D17), VCC (5V), GND
-- **Kullanım**: Menüden "Speakers" seçilir; track 1 çalar; encoder ile volume (0-30) ayarlanır; OK = pause/resume, tekrar OK = çıkış
-- **Not**: SD kartta MP3 dosyaları olmalı (01.mp3, 02.mp3 vb.)
+1. **Menü ve kullanıcı girişi:** `updateMenu()` – encoder pozisyonu ve buton durumu okunur; menü seçimi, alt menüde değer değişimi (fan %, RGB, fren) ve komut gönderimi yapılır.
+2. **Periyodik veri okuma:**  
+   - Normal: her **50 ms**’de bir `readSTM32Data()`.  
+   - Gesture ekranındayken: her **20 ms**’de bir (daha hızlı güncelleme).
+3. **Ekran güncellemesi:**  
+   - Veri geldiğinde `screenNeedsUpdate` set edilir; aynı turda `drawCurrentScreen()` ile ilgili ekran yenilenir.  
+   - Ayrıca periyodik olarak (50 ms, Gesture’da 30 ms) `drawCurrentScreen()` çağrılır.
+4. **Gecikme:** `delay(LOOP_DELAY_MS)` (5 ms) ile döngü yükü azaltılır.
 
-## Proje Yapısı
+### Veri Okuma: `readSTM32Data()`
+
+- **Gönderim:** `$A\r\n` (STM32’den anlık veri isteği).
+- **Alım:** Bir satır okunur (`\r` veya `\n`’e kadar, timeout 150 ms). İlk karakter `$` değilse satır yok sayılır.
+- **Parse:** Virgülle ayrılmış sayılar alınır (en fazla 15 alan):
+  - **1–4:** MCU load, PCB temp, plate temp (NTC), resin temp (IR) → 10’a bölünerek float.
+  - **5–7:** İntake 1/2 ve exhaust fan RPM → 10’a bölünerek float.
+  - **8:** Gesture tipi (0–4).
+  - **9–15:** TMC durumları (Z, Y, CVR1, CVR2 – sağ/sol stop).
+- **Güncelleme:** Parse sonrası global değişkenler yazılır; Gesture veya TMC Ref ekranındaysa ilgili ekran hemen çizilir.
+
+### Menü Mantığı: `updateMenu()`
+
+- **Encoder döndürme:**  
+  - Ana menüde: seçili satır değişir (kaydırmalı liste).  
+  - Alt menüde: ilgili değer değişir (fan %10 adım, RGB H/S/V, fren aç/kapa) ve komut anında gönderilir (`sendIntakeFanCommand`, `sendExhaustFanCommand`, `sendRGBLedCommand`, `sendBrakeMotorCommand`).
+- **Encoder butonu:**  
+  - Ana menüde: seçili satıra girilir (ekran değişir).  
+  - Alt menüde: çoğunda ana menüye dönülür; RGB LED’de parametre seçimi / değer modu veya çıkış.
+
+### Ekran Çizimi
+
+- Ortak yardımcılar: `drawHeader()`, `drawProgressBar()`, `drawCenteredText()`.
+- Her ekran için ayrı fonksiyon: `drawMenu()`, `drawIRTempScreen()`, `drawNTCScreen()`, fan ekranları, `drawRGBLedScreen()`, `drawGestureScreen()`, Z/Y/CVR1/CVR2 Ref, `drawBrakeMotorScreen()`.
+- Hangi ekranın çizileceği `currentMenu` ve bir fonksiyon pointer dizisi (`drawScreenFunctions[]`) ile tek noktadan `drawCurrentScreen()` ile çağrılır.
+
+---
+
+## Menü Sistemi
+
+| # | Menü | İçerik | Encoder | Buton |
+|---|------|--------|---------|--------|
+| 1 | IR Temp Sensor | Resin sıcaklığı (IR) | – | Ana menü |
+| 2 | NTC | Plate sıcaklığı (NTC) | – | Ana menü |
+| 3 | INTAKE FAN | İntake 1/2 RPM, % hız, progress bar | % 0–100 (%10 adım), komut otomatik | Ana menü |
+| 4 | EXHAUST FAN | Exhaust RPM, % hız, progress bar | % 0–100 (%10 adım), komut otomatik | Ana menü |
+| 5 | RGB LED | HSV (Hue/Sat/Value) | Parametre seçimi veya değer; komut otomatik | Alt menü/çıkış |
+| 6 | Gesture Sensor | Gesture tipi (NONE/UP/DOWN/LEFT/RIGHT) | – | Ana menü |
+| 7 | Z Ref | Z TMC stop (BASILI/PASIF) | – | Ana menü |
+| 8 | Y Ref | Y TMC sağ/sol stop | – | Ana menü |
+| 9 | CVR1 Ref | CVR1 TMC sağ/sol stop | – | Ana menü |
+| 10 | CVR2 Ref | CVR2 TMC sağ/sol stop | – | Ana menü |
+| 11 | BRAKE MOTOR | Fren motoru AKTIF/PASIF | Sağ = aktif ($B1), sol = pasif ($B0) | Ana menü |
+
+Ana menüde 6 satır görünür, seçim kaydırmalıdır.
+
+---
+
+## Proje Yapısı ve Dokümantasyon
 
 ```
 EdgePro Power Test Kiti/
 ├── src/
-│   └── main.cpp          # Ana program dosyası
-├── include/              # Header dosyaları
-├── lib/                  # Kütüphane dosyaları
-├── test/                 # Test dosyaları
-├── platformio.ini        # PlatformIO yapılandırma dosyası
-└── README.md            # Bu dosya
+│   └── main.cpp              # Tüm uygulama kodu (UART, menü, OLED, encoder)
+├── platformio.ini             # Kart: featheresp32, kütüphaneler, upload/monitor
+├── README.md                  # Bu dosya – genel bakış ve ana kod açıklaması
+├── SERI_HABERLESME.md         # UART protokolü, komutlar, veri formatı
+├── PIN_BAGLANTILARI.md        # ESP32/STM32 pinleri ve bağlantı özeti
+├── include/                   # Ek header’lar (şu an boş/README)
+├── lib/                       # Yerel kütüphaneler (şu an boş/README)
+└── test/                      # Test dosyaları (şu an boş/README)
 ```
 
-## Pin Tanımlamaları
+- **Protokol ve komutlar:** **SERI_HABERLESME.md**  
+- **Pinler ve bağlantı:** **PIN_BAGLANTILARI.md**
 
-| Bileşen | Pin | Tip | Açıklama |
-|---------|-----|-----|----------|
-| NTC Sensörü | A0 | Analog Giriş | Sıcaklık ölçümü |
-| DS18B20 Sensörü | D4 | Dijital Giriş (OneWire) | Dijital sıcaklık ölçümü |
-| RGB LED - Kırmızı | D9 | PWM Çıkış | RGB LED kırmızı kanal |
-| RGB LED - Yeşil | D10 | PWM Çıkış | RGB LED yeşil kanal |
-| RGB LED - Mavi | D11 | PWM Çıkış | RGB LED mavi kanal |
-| RGB LED Güç | 12V | Harici Güç | RGB LED için 12V güç kaynağı |
-| Rotary Encoder - DT | D22 | Dijital Giriş (INPUT_PULLUP) | Encoder data pini |
-| Rotary Encoder - CLK | D23 | Dijital Giriş (INPUT_PULLUP) | Encoder clock pini |
-| Rotary Encoder - SW | D26 | Dijital Giriş (INPUT_PULLUP) | Encoder switch/button pini |
-| Buzzer | D12 | PWM Çıkış | Sesli uyarı ve bildirimler |
-| Buton | D32 | Dijital Giriş (INPUT_PULLUP) | Buton basma algılama (pull-up bağlantılı) |
-| OLED - SDA | D20 | I2C Data | OLED ekran I2C veri (SH1106) |
-| OLED - SCL | D21 | I2C Clock | OLED ekran I2C saat (SH1106) |
-| ST7789 - CS | D53 | Dijital Çıkış | Ekran chip select (Eski - Artık kullanılmıyor) |
-| ST7789 - DC | D48 | Dijital Çıkış | Ekran data/command (Eski - Artık kullanılmıyor) |
-| ST7789 - RST | D49 | Dijital Çıkış | Ekran reset (Eski - Artık kullanılmıyor) |
-| ST7789 - SDA | D24 | Dijital Çıkış | Ekran veri (Software SPI) (Eski - Artık kullanılmıyor) |
-| ST7789 - SCL | D25 | Dijital Çıkış | Ekran saat (Software SPI) (Eski - Artık kullanılmıyor) |
-| TMC2130 - DIR | D44 | Dijital Çıkış | Step motor yön |
-| TMC2130 - STEP | D45 | Dijital Çıkış | Step motor adım |
-| TMC2130 - EN | D46 | Dijital Çıkış | Step motor enable |
-| TMC2130 - CS | D47 | Dijital Çıkış | TMC2130 SPI chip select |
-| TMC2130 - SPI | D50,D51,D52 | SPI | MISO, MOSI, SCK |
-| Brake Çıkışı | D35 | Dijital Çıkış | Fren kontrolü |
-| Intake Fan PWM | D5 | Timer3 25 kHz | Intake fan hız |
-| Exhaust Fan PWM | D2 | Timer3 25 kHz | Exhaust fan hız |
-| H4 Fan PWM | D3 | Timer3 25 kHz | H4 fan hız |
-| Intake Fan TACH | D24 | Dijital Giriş | Intake RPM |
-| Exhaust Fan TACH | D25 | Dijital Giriş | Exhaust RPM |
-| H4 Fan TACH | D27 | Dijital Giriş | H4 RPM |
-| DTP-UART-H04 (TX) | D14 | Serial3 TX | IR sensör komut (Mega→Sensör) |
-| DTP-UART-H04 (RX) | D15 | Serial3 RX | IR sensör veri (Sensör→Mega) |
-| DFPlayer Mini (TX) | D16 | Serial2 TX | DFPlayer komut (Mega→DFPlayer) |
-| DFPlayer Mini (RX) | D17 | Serial2 RX | DFPlayer yanıt (DFPlayer→Mega) |
+---
 
-## Kurulum
+## Derleme ve Yükleme
 
-1. PlatformIO IDE veya PlatformIO CLI kurulumu yapın
-2. Projeyi klonlayın veya indirin
-3. PlatformIO'da projeyi açın
-4. Arduino Mega Mini'yi USB üzerinden bilgisayara bağlayın
-5. Projeyi derleyin ve yükleyin
+**Gereksinim:** PlatformIO (VS Code eklentisi veya CLI).
 
-## Kullanım
-
-### Derleme
 ```bash
+# Derleme
 pio run
-```
 
-### Yükleme
-```bash
+# Yükleme (COM port platformio.ini içinde upload_port ile ayarlanır)
 pio run -t upload
-```
 
-### Seri Monitör
-```bash
+# Seri monitör (115200)
 pio device monitor
 ```
 
-## Kod Yapısı
+`platformio.ini` içinde `upload_port = COM6` ve `monitor_speed = 115200` kullanılır; gerekirse portu değiştirin.
 
-### Pin Tanımlamaları
-```cpp
-#define NTC_PIN A0          // NTC sıcaklık sensörü analog pin
-#define DS18B20_PIN 4       // DS18B20 sıcaklık sensörü dijital pin (D4)
-#define BRAKE_PIN 35        // Brake çıkışı dijital pin (D35)
+---
 
-// RGB LED pin tanımlamaları
-#define RGB_RED_PIN 9       // RGB LED kırmızı kanal (D9 - PWM)
-#define RGB_GREEN_PIN 10    // RGB LED yeşil kanal (D10 - PWM)
-#define RGB_BLUE_PIN 11     // RGB LED mavi kanal (D11 - PWM)
-// Not: RGB LED 12V harici güç kaynağı ile beslenir
+## Özet
 
-// Rotary Encoder pin tanımlamaları
-#define ENCODER_DT_PIN 22   // Rotary encoder DT (Data) pini (D22)
-#define ENCODER_CLK_PIN 23  // Rotary encoder CLK (Clock) pini (D23)
-#define ENCODER_SW_PIN 26   // Rotary encoder SW (Switch/Button) pini (D26)
-
-// Buzzer pin tanımlaması
-#define BUZZER_PIN 12       // Buzzer dijital pin (D12 - PWM)
-
-// Buton pin tanımlaması
-#define BUTTON_PIN 32       // Buton dijital pin (D32 - INPUT_PULLUP)
-
-// OLED 1.3 inç Ekran pin tanımlamaları (I2C - SH1106)
-// Arduino Mega'da I2C pinleri otomatik: SDA=20, SCL=21
-#define OLED_WIDTH 128      // OLED genişlik
-#define OLED_HEIGHT 64      // OLED yükseklik
-#define OLED_RESET -1        // Reset pin yoksa -1
-// I2C adresi: 0x3C veya 0x3D
-
-// ST7789 Ekran pin tanımlamaları (Eski - Artık kullanılmıyor)
-#define ST7789_CS_PIN 53    // ST7789 Chip Select pini (D53)
-#define ST7789_DC_PIN 48    // ST7789 Data/Command pini (D48)
-#define ST7789_RES_PIN 49   // ST7789 Reset pini (D49)
-#define ST7789_SDA_PIN 24   // ST7789 Serial Data pini (D24 - Software SPI)
-#define ST7789_SCL_PIN 25   // ST7789 Serial Clock pini (D25 - Software SPI)
-```
-
-### Kütüphaneler
-- **OneWire**: DS18B20 sensörü için OneWire protokol desteği
-- **DallasTemperature**: DS18B20 sensörü için sıcaklık okuma kütüphanesi
-- **Adafruit GFX Library**: Grafik çizim fonksiyonları için temel kütüphane
-- **Adafruit SH110X**: OLED 1.3 inç ekran (SH1106) için kütüphane
-- **Adafruit ST7789 Library**: ST7789 ekran kontrolcüsü için özel kütüphane (Eski - Artık kullanılmıyor)
-
-### Setup Fonksiyonu
-- Seri haberleşme başlatılır (9600 baud)
-- Pin yapılandırmaları yapılır
-- Başlangıç durumları ayarlanır
-
-### Loop Fonksiyonu
-- Şu an boş, ileride eklemeler yapılacak
-
-## Pin Değişikliği: Ekran SDA/SCL Neden D24 ve D25?
-
-README’de eskiden ekran için **SDA=D51, SCL=D52** yazıyordu. Bu pinler Arduino Mega’nın **donanım SPI** pinleri (MOSI=51, SCK=52). Aynı SPI hattına **TMC2130 step motor sürücü** de bağlandığı için:
-
-1. **Çakışma:** Hem ekran hem TMC2130 D51 (MOSI) ve D52 (SCK) kullanıyor. Program çalışırken TMC2130 SPI’ye yazınca ekran da aynı hattan sinyal alıyor → ekranda çizgiler, bozulma.
-2. **Yükleme sırasında düzgün görünmesi:** Kod atılırken sadece bootloader/upload trafiği var; TMC2130 henüz SPI kullanmıyor. Program başlayınca TMC2130 da SPI kullanmaya başlayınca çakışma oluşuyor.
-
-**Çözüm:** Ekranı bu ortak SPI hattından çıkarmak. Ekran için **Software SPI** kullanıp veri ve saati **başka iki pine** taşımak:
-
-- **Eski (çakışan):** Ekran SDA → D51, SCL → D52 (TMC2130 ile ortak).
-- **Yeni (çakışma yok):** Ekran SDA → **D24**, SCL → **D25** (sadece ekran; TMC2130 50, 51, 52’de kalıyor).
-
-**Yapman gereken:** Ekran modülündeki SDA kablosunu D51’den çıkarıp **D24**’e, SCL kablosunu D52’den çıkarıp **D25**’e tak. CS (D53), DC (D48), RST (D49) bağlantıları aynı kalır. Kod tarafında ekran zaten D24/D25 (Software SPI) olarak ayarlı.
-
-**Özet:** D51/D52 artık sadece TMC2130 için; ekran SDA/SCL için D24 ve D25 kullanılıyor. Bu sayede pin çakışması olmaz ve program çalışırken ekran bozulmaz.
-
-## Geliştirme Notları
-
-- Proje aktif olarak geliştirilmektedir
-- Yeni özellikler ve bağlantılar eklenecektir
-- Pin tanımlamaları sabit kalacak şekilde tasarlanmıştır
-
-## Gelecek Geliştirmeler
-
-- [ ] NTC sıcaklık okuma ve dönüşüm fonksiyonları
-- [ ] DS18B20 sıcaklık okuma fonksiyonları
-- [ ] RGB LED renk kontrolü ve efekt fonksiyonları
-- [ ] Rotary encoder okuma ve yön tespiti fonksiyonları
-- [ ] Buzzer ton ve melodi fonksiyonları
-- [ ] Buton okuma ve debounce fonksiyonları
-- [ ] ST7789 ekran başlatma ve grafik çizim fonksiyonları
-- [ ] Brake kontrol algoritması
-- [ ] Ek sensör ve çıkış bağlantıları
-- [ ] Seri haberleşme protokolü
-- [ ] Hata yönetimi ve güvenlik özellikleri
-
-## Lisans
-
-Bu proje özel bir projedir.
-
-## İletişim
-
-Proje hakkında sorularınız için lütfen proje sahibi ile iletişime geçin.
+- **Ana kod** tek dosyada: `setup` (OLED, UART, encoder), `loop` (updateMenu + periyodik okuma + ekran), `readSTM32Data` (parse + globals + anlık ekran), `updateMenu` (encoder/buton + komut gönderimi), ekran fonksiyonları.
+- **README** projeyi, donanımı, yazılım akışını ve menüyü açıklar; detaylı protokol ve pin bilgisi ilgili .md dosyalarına bırakılmıştır.

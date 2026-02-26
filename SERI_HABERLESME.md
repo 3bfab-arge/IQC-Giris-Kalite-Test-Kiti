@@ -2,7 +2,11 @@
 
 ## Genel Bakış
 
-Bu dokümantasyon, ESP32 Feather (Adafruit HUZZAH32) ile STM32 mikrodenetleyici arasındaki UART seri haberleşme protokolünü açıklar. Sistem, sensör verilerini okumak, fan hızlarını kontrol etmek, RGB LED ayarlamak, fren motorunu kontrol etmek ve TMC status bilgilerini görüntülemek için kullanılır.
+Bu dokümantasyon, **ESP32 Feather (Adafruit HUZZAH32)** ile **STM32** mikrodenetleyici arasındaki **UART seri haberleşme protokolünü** açıklar. Sistem, sensör verilerini okumak, fan hızlarını kontrol etmek, RGB LED ayarlamak, fren motorunu kontrol etmek ve TMC status bilgilerini görüntülemek için kullanılır.
+
+**İlgili dosyalar:**
+- **README.md** – Proje özeti, ana kod akışı (`setup`, `loop`, `readSTM32Data`, menü) ve menü listesi.
+- **PIN_BAGLANTILARI.md** – ESP32 ve STM32 pinleri, UART/OLED/Encoder bağlantıları.
 
 ---
 

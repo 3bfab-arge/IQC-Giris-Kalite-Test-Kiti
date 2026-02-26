@@ -2,23 +2,31 @@
 
 Repo adı: **Edge-Pro-Power-Test-Kiti-**
 
-## 1. Proje klasöründe Terminal açın
+## Yöntem 1: Script ile (en kolay)
 
-- VS Code / Cursor: `Terminal > New Terminal` (proje kökünde açılır)
-- veya Windows: Proje klasörüne gidip adres çubuğuna `cmd` yazıp Enter
+1. Cursor'da **Terminal > New Terminal** açın (proje klasöründe açılır).
+2. Şu komutu çalıştırın:
 
-## 2. Aşağıdaki komutları sırayla çalıştırın
+```powershell
+.\push-github.ps1
+```
 
-**GitHub kullanıcı adınızı** aşağıdaki `KULLANICI_ADINIZ` yerine yazın.
+3. İstenirse GitHub kullanıcı adınızı yazın, Enter'a basın.
+4. Şifre/Token istenirse girin (Token: GitHub → Settings → Developer settings → Personal access tokens).
+
+---
+
+## Yöntem 2: Komutları elle yazın
+
+**Proje klasöründe** Terminal açıp aşağıdaki iki satırı çalıştırın.  
+`KULLANICI_ADINIZ` yerine **kendi GitHub kullanıcı adınızı** yazın.
 
 ```bash
-git init
-git add .
-git commit -m "EdgePro Power Test Kiti - ESP32 Feather, STM32 UART, OLED, Encoder menü"
-git branch -M main
 git remote add origin https://github.com/KULLANICI_ADINIZ/Edge-Pro-Power-Test-Kiti-.git
 git push -u origin main
 ```
+
+Not: Commit zaten yapıldı, sadece remote ekleyip push etmeniz yeterli.
 
 ## 3. İlk kez push'ta
 

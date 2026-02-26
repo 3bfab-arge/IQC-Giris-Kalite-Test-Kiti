@@ -88,13 +88,33 @@ enum MenuState {
   MENU_Y_REF,
   MENU_CVR1_REF,
   MENU_CVR2_REF,
-  MENU_BRAKE_MOTOR
+  MENU_BRAKE_MOTOR,
+  MENU_Z_MOTOR,
+  MENU_Y_MOTOR,
+  MENU_CVR_MOTOR,
+  MENU_PROJEKSIYON
 };
 
 MenuState currentMenu = MENU_MAIN;
-int menuSelection = 0; // 0-10 arasi menü seçimi
-const char* menuItems[] = {"IR Temp Sensor", "NTC", "INTAKE FAN", "EXHAUST FAN", "RGB LED", "Gesture Sensor", "Z Ref", "Y Ref", "CVR1 Ref", "CVR2 Ref", "BRAKE MOTOR"};
-const int menuItemCount = 11;
+int menuSelection = 0; // 0-14 arasi menü seçimi
+const char* menuItems[] = {
+  "IR Temp Sensor",
+  "NTC",
+  "INTAKE FAN",
+  "EXHAUST FAN",
+  "RGB LED",
+  "Gesture Sensor",
+  "Z Ref",
+  "Y Ref",
+  "CVR1 Ref",
+  "CVR2 Ref",
+  "BRAKE MOTOR",
+  "Z Motor",
+  "Y Motor",
+  "CVR Motor",
+  "Projeksiyon"
+};
+const int menuItemCount = 15;
 bool screenNeedsUpdate = true;
 
 // Intake Fan ayarlama degiskenleri
@@ -117,6 +137,37 @@ bool rgbCommandSent = false; // Komut gonderildi mi?
 // Brake Motor ayarlama degiskenleri
 bool brakeMotorActive = false; // false: pasif ($B0), true: aktif ($B1)
 
+// Z Motor ayarlama degiskenleri (mikrostep tabanli)
+bool zMotorEnabled = false;        // $SZE / $SZD
+int  zMotorDir = 1;                // 0: geri, 1: ileri
+long zMotorDistanceSteps = 1600;   // mikrostep cinsinden mesafe (örn. 1 tur = 1600)
+long zMotorSpeedStepsPerS = 1600;  // mikrostep/s cinsinden hiz (örn. 1 tur/s)
+int  zMotorParamSelection = 0;     // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
+bool zMotorEditMode = false;       // false: satir secimi, true: deger ayarlama (Yon/Mesafe/Hiz)
+
+// Y Motor ayarlama degiskenleri (mikrostep tabanli)
+bool yMotorEnabled = false;      // $SYE / $SYD
+int  yMotorDir = 1;              // 0: geri, 1: ileri
+long yMotorDistanceSteps = 1600; // mikrostep cinsinden mesafe (örn. 1 tur = 1600)
+long yMotorSpeedStepsPerS = 1600;// mikrostep/s cinsinden hiz (örn. 1 tur/s)
+int  yMotorParamSelection = 0;   // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
+bool yMotorEditMode = false;     // false: satir secimi, true: deger ayarlama
+
+// CVR Motor ayarlama degiskenleri (mikrostep tabanli, 2 motor: CVR-1 ve CVR-2)
+int  cvrMotorSelected = 1;           // 1: CVR-1, 2: CVR-2
+bool cvrMotorEnabled[3] = {false};   // index 1 ve 2 kullaniliyor ($S1E/$S2E, $S1D/$S2D)
+int  cvrMotorDir[3] = {0, 1, 1};     // 0: geri, 1: ileri
+long cvrMotorDistanceSteps[3] = {0, 1600, 1600};    // mikrostep mesafe
+long cvrMotorSpeedStepsPerS[3] = {0, 1600, 1600};   // mikrostep/s hiz
+int  cvrMotorParamSelection = 0;     // 0: Motor, 1: Durum, 2: Yon, 3: Mesafe, 4: Hiz, 5: Hareket, 6: Geri
+bool cvrMotorEditMode = false;       // false: satir secimi, true: deger ayarlama
+
+// Projeksiyon (LED) ayarlama degiskenleri
+bool projeksiyonLedOn = false;       // $P1 ON / $P0 OFF
+int  projeksiyonAkim = 512;          // 91-1023, $PC<deger>
+int  projeksiyonParamSelection = 0;  // 0: Durum, 1: Akim, 2: Geri
+bool projeksiyonEditMode = false;    // false: satir secimi, true: akim ayarlama
+
 static unsigned long lastRead = 0;
 static unsigned long lastButtonPress = 0;
 
@@ -135,7 +186,23 @@ void drawYRefScreen();
 void drawCVR1RefScreen();
 void drawCVR2RefScreen();
 void drawBrakeMotorScreen();
+void drawZMotorScreen();
+void drawYMotorScreen();
+void drawCVRMotorScreen();
+void drawProjeksiyonScreen();
 void sendBrakeMotorCommand(bool active);
+void sendProjeksiyonOn();
+void sendProjeksiyonOff();
+void sendProjeksiyonCurrent();
+void sendZMotorEnable(bool enable);
+void sendZMotorStop();
+void sendZMotorMove();
+void sendYMotorEnable(bool enable);
+void sendYMotorStop();
+void sendYMotorMove();
+void sendCVRMotorEnable(int motor, bool enable);
+void sendCVRMotorStop(int motor);
+void sendCVRMotorMove(int motor);
 void sendIntakeFanCommand();
 void sendExhaustFanCommand();
 void sendRGBLedCommand();
@@ -601,6 +668,318 @@ void sendBrakeMotorCommand(bool active) {
   Serial.println(active ? "$B1" : "$B0");
 }
 
+// Z Motor ekranı
+void drawZMotorScreen() {
+  display.clearDisplay();
+  drawHeader("Z Motor");
+
+  // Satirlar:
+  // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
+  int y = 16;
+  for (int row = 0; row < 6; row++) {
+    display.setCursor(0, y);
+    if (row == zMotorParamSelection) {
+      display.print(zMotorEditMode ? "*" : ">");
+    } else {
+      display.print(" ");
+    }
+    display.print(" ");
+
+    if (row == 0) {
+      display.print("Durum: ");
+      display.print(zMotorEnabled ? "AKTIF" : "PASIF");
+    } else if (row == 1) {
+      display.print("Yon  : ");
+      display.print(zMotorDir == 1 ? "ILERI" : "GERI");
+    } else if (row == 2) {
+      display.print("Mesafe: ");
+      display.print(zMotorDistanceSteps);
+      display.print(" ustep");
+    } else if (row == 3) {
+      display.print("Hiz  : ");
+      display.print(zMotorSpeedStepsPerS);
+      display.print(" ustep/s");
+    } else if (row == 4) {
+      display.print("Hareket: Z komutu");
+    } else if (row == 5) {
+      display.print("Geri");
+    }
+
+    y += 9;
+  }
+
+  display.display();
+}
+
+void sendZMotorEnable(bool enable) {
+  // Z motoru icin S on ekli protokol: $SZE / $SZD
+  Serial1.print(enable ? "$SZE" : "$SZD");
+  Serial1.print("\r\n");
+  Serial1.flush();
+  Serial.print("Z Motor Enable: ");
+  Serial.println(enable ? "$SZE\\r\\n" : "$SZD\\r\\n");
+}
+
+void sendZMotorStop() {
+  // Z motor durdurma: $SZP
+  Serial1.print("$SZP\r\n");
+  Serial1.flush();
+  Serial.println("Z Motor Stop: $SZP");
+}
+
+void sendZMotorMove() {
+  // Format: $SZ<yon>,<mesafe>,<hiz>\r\n  (mesafe: mikrostep, hiz: mikrostep/s)
+  Serial1.print("$SZ");
+  Serial1.print(zMotorDir);
+  Serial1.print(",");
+  Serial1.print(zMotorDistanceSteps);
+  Serial1.print(",");
+  Serial1.print(zMotorSpeedStepsPerS);
+  Serial1.print("\r\n");
+  Serial1.flush();
+
+  Serial.print("Z Motor Move: $SZ");
+  Serial.print(zMotorDir);
+  Serial.print(",");
+  Serial.print(zMotorDistanceSteps);
+  Serial.print(",");
+  Serial.print(zMotorSpeedStepsPerS);
+  Serial.println("\\r\\n");
+}
+
+// Y Motor ekranı (mikrostep tabanlı)
+void drawYMotorScreen() {
+  display.clearDisplay();
+  drawHeader("Y Motor");
+
+  // Satirlar:
+  // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
+  int y = 16;
+  for (int row = 0; row < 6; row++) {
+    display.setCursor(0, y);
+    if (row == yMotorParamSelection) {
+      display.print(yMotorEditMode ? "*" : ">");
+    } else {
+      display.print(" ");
+    }
+    display.print(" ");
+
+    if (row == 0) {
+      display.print("Durum: ");
+      display.print(yMotorEnabled ? "AKTIF" : "PASIF");
+    } else if (row == 1) {
+      display.print("Yon  : ");
+      display.print(yMotorDir == 1 ? "ILERI" : "GERI");
+    } else if (row == 2) {
+      display.print("Mesafe: ");
+      display.print(yMotorDistanceSteps);
+      display.print(" ustep");
+    } else if (row == 3) {
+      display.print("Hiz  : ");
+      display.print(yMotorSpeedStepsPerS);
+      display.print(" ustep/s");
+    } else if (row == 4) {
+      display.print("Hareket: SY komutu");
+    } else if (row == 5) {
+      display.print("Geri");
+    }
+
+    y += 9;
+  }
+
+  display.display();
+}
+
+void sendYMotorEnable(bool enable) {
+  Serial1.print(enable ? "$SYE" : "$SYD");
+  Serial1.print("\r\n");
+  Serial1.flush();
+  Serial.print("Y Motor Enable: ");
+  Serial.println(enable ? "$SYE\\r\\n" : "$SYD\\r\\n");
+}
+
+void sendYMotorStop() {
+  Serial1.print("$SYP\r\n");
+  Serial1.flush();
+  Serial.println("Y Motor Stop: $SYP");
+}
+
+void sendYMotorMove() {
+  // Format: $SY<yon>,<mesafe>,<hiz>\r\n  (mesafe: mikrostep, hiz: mikrostep/s)
+  Serial1.print("$SY");
+  Serial1.print(yMotorDir);
+  Serial1.print(",");
+  Serial1.print(yMotorDistanceSteps);
+  Serial1.print(",");
+  Serial1.print(yMotorSpeedStepsPerS);
+  Serial1.print("\r\n");
+  Serial1.flush();
+
+  Serial.print("Y Motor Move: $SY");
+  Serial.print(yMotorDir);
+  Serial.print(",");
+  Serial.print(yMotorDistanceSteps);
+  Serial.print(",");
+  Serial.print(yMotorSpeedStepsPerS);
+  Serial.println("\\r\\n");
+}
+
+// CVR Motor ekranı (mikrostep tabanlı, CVR-1 ve CVR-2)
+void drawCVRMotorScreen() {
+  display.clearDisplay();
+  drawHeader("CVR Motor");
+
+  int m = cvrMotorSelected; // 1 veya 2
+
+  // Satirlar:
+  // 0: Motor, 1: Durum, 2: Yon, 3: Mesafe, 4: Hiz, 5: Hareket, 6: Geri
+  int y = 16;
+  for (int row = 0; row < 7; row++) {
+    display.setCursor(0, y);
+    if (row == cvrMotorParamSelection) {
+      display.print(cvrMotorEditMode ? "*" : ">");
+    } else {
+      display.print(" ");
+    }
+    display.print(" ");
+
+    if (row == 0) {
+      display.print("Motor: CVR-");
+      display.print(cvrMotorSelected);
+    } else if (row == 1) {
+      display.print("Durum: ");
+      display.print(cvrMotorEnabled[m] ? "AKTIF" : "PASIF");
+    } else if (row == 2) {
+      display.print("Yon  : ");
+      display.print(cvrMotorDir[m] == 1 ? "ILERI" : "GERI");
+    } else if (row == 3) {
+      display.print("Mesafe: ");
+      display.print(cvrMotorDistanceSteps[m]);
+      display.print(" ustep");
+    } else if (row == 4) {
+      display.print("Hiz  : ");
+      display.print(cvrMotorSpeedStepsPerS[m]);
+      display.print(" ustep/s");
+    } else if (row == 5) {
+      display.print("Hareket: S");
+      display.print(cvrMotorSelected);
+      display.print(" komutu");
+    } else if (row == 6) {
+      display.print("Geri");
+    }
+
+    y += 9;
+  }
+
+  display.display();
+}
+
+void sendCVRMotorEnable(int motor, bool enable) {
+  Serial1.print("$S");
+  Serial1.print(motor);
+  Serial1.print(enable ? "E" : "D");
+  Serial1.print("\r\n");
+  Serial1.flush();
+  Serial.print("CVR");
+  Serial.print(motor);
+  Serial.print(" Enable: $S");
+  Serial.print(motor);
+  Serial.println(enable ? "E\\r\\n" : "D\\r\\n");
+}
+
+void sendCVRMotorStop(int motor) {
+  Serial1.print("$S");
+  Serial1.print(motor);
+  Serial1.print("P\r\n");
+  Serial1.flush();
+  Serial.print("CVR");
+  Serial.print(motor);
+  Serial.println(" Stop");
+}
+
+void sendCVRMotorMove(int motor) {
+  // Format: $S<MotorNo><yon>,<mesafe>,<hiz>\r\n
+  Serial1.print("$S");
+  Serial1.print(motor);
+  Serial1.print(cvrMotorDir[motor]);
+  Serial1.print(",");
+  Serial1.print(cvrMotorDistanceSteps[motor]);
+  Serial1.print(",");
+  Serial1.print(cvrMotorSpeedStepsPerS[motor]);
+  Serial1.print("\r\n");
+  Serial1.flush();
+
+  Serial.print("CVR");
+  Serial.print(motor);
+  Serial.print(" Move: $S");
+  Serial.print(motor);
+  Serial.print(cvrMotorDir[motor]);
+  Serial.print(",");
+  Serial.print(cvrMotorDistanceSteps[motor]);
+  Serial.print(",");
+  Serial.print(cvrMotorSpeedStepsPerS[motor]);
+  Serial.println("\\r\\n");
+}
+
+// --- Projeksiyon (LED) ---
+void sendProjeksiyonOn() {
+  Serial1.print("$P1\r\n");
+  Serial1.flush();
+  Serial.println("Projeksiyon: $P1\\r\\n (LED ON)");
+}
+
+void sendProjeksiyonOff() {
+  Serial1.print("$P0\r\n");
+  Serial1.flush();
+  Serial.println("Projeksiyon: $P0\\r\\n (LED OFF)");
+}
+
+void sendProjeksiyonCurrent() {
+  Serial1.print("$PC");
+  Serial1.print(projeksiyonAkim);
+  Serial1.print("\r\n");
+  Serial1.flush();
+  Serial.print("Projeksiyon Akim: $PC");
+  Serial.print(projeksiyonAkim);
+  Serial.println("\\r\\n");
+}
+
+void drawProjeksiyonScreen() {
+  display.clearDisplay();
+  drawHeader("Projeksiyon (LED)");
+
+  const int rowCount = 3;
+  int selected = projeksiyonParamSelection;
+  if (selected < 0) selected = 0;
+  if (selected >= rowCount) selected = rowCount - 1;
+
+  for (int row = 0; row < rowCount; row++) {
+    int y = 18 + row * 9;
+    display.setCursor(0, y);
+    if (row == selected) {
+      display.print(">");
+    } else {
+      display.print(" ");
+    }
+    display.setCursor(6, y);
+
+    if (row == 0) {
+      display.print("Durum: ");
+      display.print(projeksiyonLedOn ? "ACIK" : "KAPALI");
+    } else if (row == 1) {
+      display.print("Akim  : ");
+      display.print(projeksiyonAkim);
+      if (projeksiyonEditMode) display.print(" *");
+    } else if (row == 2) {
+      display.print("Geri");
+    }
+
+    y += 9;
+  }
+
+  display.display();
+}
+
 void drawIntakeFanScreen() {
   display.clearDisplay();
   drawHeader("INTAKE FAN");
@@ -872,6 +1251,107 @@ void updateMenu() {
       sendBrakeMotorCommand(brakeMotorActive);
       drawBrakeMotorScreen();
       screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_Z_MOTOR) {
+      // Z MOTOR ekraninda encoder ile satir secimi veya deger ayarlama
+      if (!zMotorEditMode) {
+        // Satir secimi (0-5)
+        zMotorParamSelection += diff;
+        if (zMotorParamSelection < 0) zMotorParamSelection = 5;
+        if (zMotorParamSelection > 5) zMotorParamSelection = 0;
+      } else {
+        // Deger ayarlama modu
+        if (zMotorParamSelection == 1) {
+          // Yon: 0 veya 1
+          if (diff > 0) zMotorDir = 1;
+          if (diff < 0) zMotorDir = 0;
+        } else if (zMotorParamSelection == 2) {
+          // Mesafe: 1-100000 mikrostep, her adimda 100 mikrostep
+          zMotorDistanceSteps += diff * 100;
+          if (zMotorDistanceSteps < 100) zMotorDistanceSteps = 100;
+          if (zMotorDistanceSteps > 100000) zMotorDistanceSteps = 100000;
+        } else if (zMotorParamSelection == 3) {
+          // Hiz: 100-20000 mikrostep/s, her adimda 100 mikrostep/s
+          zMotorSpeedStepsPerS += diff * 100;
+          if (zMotorSpeedStepsPerS < 100) zMotorSpeedStepsPerS = 100;
+          if (zMotorSpeedStepsPerS > 20000) zMotorSpeedStepsPerS = 20000;
+        }
+      }
+      drawZMotorScreen();
+      screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_Y_MOTOR) {
+      // Y MOTOR ekraninda encoder ile satir secimi veya deger ayarlama
+      if (!yMotorEditMode) {
+        // Satir secimi (0-5)
+        yMotorParamSelection += diff;
+        if (yMotorParamSelection < 0) yMotorParamSelection = 5;
+        if (yMotorParamSelection > 5) yMotorParamSelection = 0;
+      } else {
+        // Deger ayarlama modu
+        if (yMotorParamSelection == 1) {
+          // Yon: 0 veya 1
+          if (diff > 0) yMotorDir = 1;
+          if (diff < 0) yMotorDir = 0;
+        } else if (yMotorParamSelection == 2) {
+          // Mesafe: 1-100000 mikrostep, her adimda 100 mikrostep
+          yMotorDistanceSteps += diff * 100;
+          if (yMotorDistanceSteps < 100) yMotorDistanceSteps = 100;
+          if (yMotorDistanceSteps > 100000) yMotorDistanceSteps = 100000;
+        } else if (yMotorParamSelection == 3) {
+          // Hiz: 100-20000 mikrostep/s, her adimda 100 mikrostep/s
+          yMotorSpeedStepsPerS += diff * 100;
+          if (yMotorSpeedStepsPerS < 100) yMotorSpeedStepsPerS = 100;
+          if (yMotorSpeedStepsPerS > 20000) yMotorSpeedStepsPerS = 20000;
+        }
+      }
+      drawYMotorScreen();
+      screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_CVR_MOTOR) {
+      // CVR MOTOR ekraninda encoder ile satir secimi veya deger ayarlama
+      if (!cvrMotorEditMode) {
+        // Satir secimi (0-6)
+        cvrMotorParamSelection += diff;
+        if (cvrMotorParamSelection < 0) cvrMotorParamSelection = 6;
+        if (cvrMotorParamSelection > 6) cvrMotorParamSelection = 0;
+      } else {
+        int m = cvrMotorSelected; // 1 veya 2
+        if (cvrMotorParamSelection == 0) {
+          // Motor secimi: 1 <-> 2
+          if (diff != 0) {
+            cvrMotorSelected = (cvrMotorSelected == 1) ? 2 : 1;
+          }
+        } else if (cvrMotorParamSelection == 2) {
+          // Yon: 0 veya 1
+          if (diff > 0) cvrMotorDir[m] = 1;
+          if (diff < 0) cvrMotorDir[m] = 0;
+        } else if (cvrMotorParamSelection == 3) {
+          // Mesafe: 1-100000 mikrostep, her adimda 100 mikrostep
+          cvrMotorDistanceSteps[m] += diff * 100;
+          if (cvrMotorDistanceSteps[m] < 100) cvrMotorDistanceSteps[m] = 100;
+          if (cvrMotorDistanceSteps[m] > 100000) cvrMotorDistanceSteps[m] = 100000;
+        } else if (cvrMotorParamSelection == 4) {
+          // Hiz: 100-20000 mikrostep/s, her adimda 100 mikrostep/s
+          cvrMotorSpeedStepsPerS[m] += diff * 100;
+          if (cvrMotorSpeedStepsPerS[m] < 100) cvrMotorSpeedStepsPerS[m] = 100;
+          if (cvrMotorSpeedStepsPerS[m] > 20000) cvrMotorSpeedStepsPerS[m] = 20000;
+        }
+      }
+      drawCVRMotorScreen();
+      screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_PROJEKSIYON) {
+      // Projeksiyon ekraninda encoder: satir secimi veya akim ayari
+      if (!projeksiyonEditMode) {
+        projeksiyonParamSelection += diff;
+        if (projeksiyonParamSelection < 0) projeksiyonParamSelection = 2;
+        if (projeksiyonParamSelection > 2) projeksiyonParamSelection = 0;
+      } else {
+        // Akim satirinda: 0-1023, ornek adim 10
+        projeksiyonAkim += diff * 10;
+        if (projeksiyonAkim < 91) projeksiyonAkim = 91;
+        if (projeksiyonAkim > 1023) projeksiyonAkim = 1023;
+        sendProjeksiyonCurrent();
+      }
+      drawProjeksiyonScreen();
+      screenNeedsUpdate = false;
     }
     lastEncoderPos = encoderPos;
   }
@@ -937,6 +1417,57 @@ void updateMenu() {
         brakeMotorActive = false; // Pasif ile baslat
         lastEncoderPos = encoderPos; // Encoder pozisyonunu koru
         drawBrakeMotorScreen();
+      } else if (menuSelection == 11) {
+        currentMenu = MENU_Z_MOTOR;
+        // Varsayilan Z motor parametreleri
+        zMotorEnabled = false;
+        zMotorDir = 1;
+        zMotorDistanceSteps = 1600;   // 1 tur
+        zMotorSpeedStepsPerS = 1600;  // 1 tur/s
+        zMotorParamSelection = 0;
+        zMotorEditMode = false;
+        encoderPos = 0;
+        lastEncoderPos = 0;
+        Serial.println("Z Menu: enter");
+        drawZMotorScreen();
+      } else if (menuSelection == 12) {
+        currentMenu = MENU_Y_MOTOR;
+        // Varsayilan Y motor parametreleri
+        yMotorEnabled = false;
+        yMotorDir = 1;
+        yMotorDistanceSteps = 1600;   // 1 tur
+        yMotorSpeedStepsPerS = 1600;  // 1 tur/s
+        yMotorParamSelection = 0;
+        yMotorEditMode = false;
+        encoderPos = 0;
+        lastEncoderPos = 0;
+        drawYMotorScreen();
+      } else if (menuSelection == 13) {
+        currentMenu = MENU_CVR_MOTOR;
+        // Varsayilan CVR motor parametreleri
+        cvrMotorSelected = 1;
+        cvrMotorEnabled[1] = false;
+        cvrMotorEnabled[2] = false;
+        cvrMotorDir[1] = 1;
+        cvrMotorDir[2] = 1;
+        cvrMotorDistanceSteps[1] = 1600;
+        cvrMotorDistanceSteps[2] = 1600;
+        cvrMotorSpeedStepsPerS[1] = 1600;
+        cvrMotorSpeedStepsPerS[2] = 1600;
+        cvrMotorParamSelection = 0;
+        cvrMotorEditMode = false;
+        encoderPos = 0;
+        lastEncoderPos = 0;
+        drawCVRMotorScreen();
+      } else if (menuSelection == 14) {
+        currentMenu = MENU_PROJEKSIYON;
+        projeksiyonLedOn = false;
+        projeksiyonAkim = 512;
+        projeksiyonParamSelection = 0;
+        projeksiyonEditMode = false;
+        encoderPos = 0;
+        lastEncoderPos = 0;
+        drawProjeksiyonScreen();
       }
     } else if (currentMenu == MENU_INTAKE_FAN) {
       // Butona basinca ana menuye don
@@ -980,6 +1511,151 @@ void updateMenu() {
       // Butona basinca ana menuye don
       currentMenu = MENU_MAIN;
       drawMenu();
+    } else if (currentMenu == MENU_Z_MOTOR) {
+      // Z Motor ekraninda buton davranisi
+      if (!zMotorEditMode) {
+        // Satir secimi modunda
+        if (zMotorParamSelection == 0) {
+          // Durum: enable/disable
+          zMotorEnabled = !zMotorEnabled;
+          if (!zMotorEnabled) {
+            // Devre disi alirken once durdur, sonra disable
+            sendZMotorStop();
+          }
+          sendZMotorEnable(zMotorEnabled);
+          drawZMotorScreen();
+        } else if (zMotorParamSelection == 1 ||
+                   zMotorParamSelection == 2 ||
+                   zMotorParamSelection == 3) {
+          // Yon / Mesafe / Hiz icin deger ayarlama moduna gec
+          zMotorEditMode = true;
+          drawZMotorScreen();
+        } else if (zMotorParamSelection == 4) {
+          // Hareket: enable degilse once enable, sonra hareket komutu
+          if (!zMotorEnabled) {
+            zMotorEnabled = true;
+            sendZMotorEnable(true);
+          }
+          // STM32 tarafinin enable komutunu isleyebilmesi icin kisa bekleme
+          delay(100); // 100ms
+          sendZMotorMove();
+          drawZMotorScreen();
+        } else if (zMotorParamSelection == 5) {
+          // Geri: ana menuye don
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
+      } else {
+        // Deger ayarlama modundan cik
+        zMotorEditMode = false;
+        drawZMotorScreen();
+      }
+    } else if (currentMenu == MENU_Y_MOTOR) {
+      // Y Motor ekraninda buton davranisi
+      if (!yMotorEditMode) {
+        // Satir secimi modunda
+        if (yMotorParamSelection == 0) {
+          // Durum: enable/disable
+          yMotorEnabled = !yMotorEnabled;
+          if (!yMotorEnabled) {
+            // Devre disi alirken once stop, sonra disable
+            sendYMotorStop();
+          }
+          sendYMotorEnable(yMotorEnabled);
+          drawYMotorScreen();
+        } else if (yMotorParamSelection == 1 ||
+                   yMotorParamSelection == 2 ||
+                   yMotorParamSelection == 3) {
+          // Yon / Mesafe / Hiz icin deger ayarlama moduna gec
+          yMotorEditMode = true;
+          drawYMotorScreen();
+        } else if (yMotorParamSelection == 4) {
+          // Hareket: enable degilse once enable, sonra hareket komutu
+          if (!yMotorEnabled) {
+            yMotorEnabled = true;
+            sendYMotorEnable(true);
+          }
+          // STM32 tarafinin enable komutunu isleyebilmesi icin kisa bekleme
+          delay(100); // 100ms
+          sendYMotorMove();
+          drawYMotorScreen();
+        } else if (yMotorParamSelection == 5) {
+          // Geri: ana menuye don
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
+      } else {
+        // Deger ayarlama modundan cik
+        yMotorEditMode = false;
+        drawYMotorScreen();
+      }
+    } else if (currentMenu == MENU_CVR_MOTOR) {
+      // CVR Motor ekraninda buton davranisi
+      if (!cvrMotorEditMode) {
+        int m = cvrMotorSelected; // 1 veya 2
+        if (cvrMotorParamSelection == 0) {
+          // Motor: 1 <-> 2
+          cvrMotorSelected = (cvrMotorSelected == 1) ? 2 : 1;
+          drawCVRMotorScreen();
+        } else if (cvrMotorParamSelection == 1) {
+          // Durum: enable/disable
+          cvrMotorEnabled[m] = !cvrMotorEnabled[m];
+          if (!cvrMotorEnabled[m]) {
+            // Devre disi alirken once stop, sonra disable
+            sendCVRMotorStop(m);
+          }
+          sendCVRMotorEnable(m, cvrMotorEnabled[m]);
+          drawCVRMotorScreen();
+        } else if (cvrMotorParamSelection == 2 ||
+                   cvrMotorParamSelection == 3 ||
+                   cvrMotorParamSelection == 4) {
+          // Yon / Mesafe / Hiz icin deger ayarlama moduna gec
+          cvrMotorEditMode = true;
+          drawCVRMotorScreen();
+        } else if (cvrMotorParamSelection == 5) {
+          // Hareket: enable degilse once enable, sonra hareket komutu
+          if (!cvrMotorEnabled[m]) {
+            cvrMotorEnabled[m] = true;
+            sendCVRMotorEnable(m, true);
+          }
+          sendCVRMotorMove(m);
+          drawCVRMotorScreen();
+        } else if (cvrMotorParamSelection == 6) {
+          // Geri: ana menuye don
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
+      } else {
+        // Deger ayarlama modundan cik
+        cvrMotorEditMode = false;
+        drawCVRMotorScreen();
+      }
+    } else if (currentMenu == MENU_PROJEKSIYON) {
+      // Projeksiyon ekraninda buton davranisi
+      if (!projeksiyonEditMode) {
+        if (projeksiyonParamSelection == 0) {
+          // Durum: LED ac/kapa
+          projeksiyonLedOn = !projeksiyonLedOn;
+          if (projeksiyonLedOn) {
+            sendProjeksiyonOn();
+          } else {
+            sendProjeksiyonOff();
+          }
+          drawProjeksiyonScreen();
+        } else if (projeksiyonParamSelection == 1) {
+          // Akim: deger ayarlama moduna gec
+          projeksiyonEditMode = true;
+          drawProjeksiyonScreen();
+        } else if (projeksiyonParamSelection == 2) {
+          // Geri: ana menuye don
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
+      } else {
+        // Akim ayarlama modundan cik
+        projeksiyonEditMode = false;
+        drawProjeksiyonScreen();
+      }
     } else {
       // Diger detay ekranlarindan geri don
       currentMenu = MENU_MAIN;
@@ -997,17 +1673,21 @@ static unsigned long lastScreenUpdate = 0;
 typedef void (*DrawScreenFunc)();
 DrawScreenFunc drawScreenFunctions[] = {
   drawMenu,              // MENU_MAIN
-  drawIRTempScreen,     // MENU_IR_TEMP
-  drawNTCScreen,        // MENU_NTC
+  drawIRTempScreen,      // MENU_IR_TEMP
+  drawNTCScreen,         // MENU_NTC
   drawIntakeFanScreen,   // MENU_INTAKE_FAN
   drawExhaustFanScreen,  // MENU_EXHAUST_FAN
   drawRGBLedScreen,      // MENU_RGB_LED
-  drawGestureScreen,      // MENU_GESTURE
+  drawGestureScreen,     // MENU_GESTURE
   drawZRefScreen,        // MENU_Z_REF
   drawYRefScreen,        // MENU_Y_REF
   drawCVR1RefScreen,     // MENU_CVR1_REF
   drawCVR2RefScreen,     // MENU_CVR2_REF
-  drawBrakeMotorScreen   // MENU_BRAKE_MOTOR
+  drawBrakeMotorScreen,  // MENU_BRAKE_MOTOR
+  drawZMotorScreen,      // MENU_Z_MOTOR
+  drawYMotorScreen,      // MENU_Y_MOTOR
+  drawCVRMotorScreen,    // MENU_CVR_MOTOR
+  drawProjeksiyonScreen  // MENU_PROJEKSIYON
 };
 
 // Optimize edilmiş ekran çizim fonksiyonu

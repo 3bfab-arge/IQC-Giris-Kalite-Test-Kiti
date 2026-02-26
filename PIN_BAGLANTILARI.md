@@ -1,136 +1,113 @@
-# UART Pin Bağlantıları
+# Pin Bağlantıları
+
+Bu dosya **Edge Pro Power Test Kiti** projesinde kullanılan kartların pin tanımlarını ve bağlantılarını açıklar. Ana kontrol kartı **Adafruit HUZZAH32 ESP32 Feather**’dır; sensör ve çıkışlar **STM32** tarafında olup ESP32 ile UART üzerinden haberleşir.
 
 ---
 
-## Adafruit HUZZAH32 ESP32 Feather (Şu an kullanılan)
+## 1. Adafruit HUZZAH32 ESP32 Feather (Ana Kart)
 
-**Docklight'ta görünüyor, Feather'da görünmüyorsa kontrol listesi:**
+Proje bu kart üzerinde çalışır. OLED, encoder ve STM32 bağlantıları aşağıdadır.
 
-1. **Bağlantı (mutlaka böyle olmalı):**
-   - **STM32 TX** → **Feather RX (GPIO 16)**  
-   - **STM32 RX** → **Feather TX (GPIO 17)**  
-   - **Feather GND** ↔ **STM32 GND** (ortak toprak, olmazsa olmaz!)
+### 1.1. Özet Tablo
 
-2. **Sık yapılan hata:**  
-   STM32 TX'i Feather **TX**'e bağlamak → veri gelmez.  
-   STM32 TX her zaman **Feather RX**'e gitmeli.
+| İşlev | GPIO | Feather Pin / Not | Açıklama |
+|-------|------|-------------------|----------|
+| **UART – RX** | 16 | RX (Serial1) | STM32’den gelen veri (STM32 TX → bu pin) |
+| **UART – TX** | 17 | TX (Serial1) | STM32’ye giden komut (bu pin → STM32 RX) |
+| **Encoder CLK** | 33 | – | Rotary encoder saat (KY-040 vb.) |
+| **Encoder DT** | 12 | – | Rotary encoder veri |
+| **Encoder SW** | 27 | – | Encoder butonu (menü seç / geri) |
+| **OLED** | I2C | SDA, SCL | 128x64 SSD1306, adres 0x3C (donanım I2C) |
 
-3. **Pin karışıklığı:**  
-   Kart üzerinde "RX" yazan pin = GPIO 16 (giriş).  
-   "TX" yazan pin = GPIO 17 (çıkış).  
-   STM32'nin **gönderen (TX)** çıkışı Feather'ın **RX**'ine bağlanmalı.
+Kodda kullanılan sabitler: `UART_RX 16`, `UART_TX 17`, `ENCODER_CLK 33`, `ENCODER_DT 12`, `ENCODER_SW 27`, `SCREEN_ADDRESS 0x3C`.
 
-4. **Baud rate:**  
-   STM32 ve kod 115200 ise aynı kalmalı.
+### 1.2. UART (STM32) Bağlantısı
 
-5. **Deneme:**  
-   Feather'da RX/TX etiketli pinler 16/17 değilse koda `Serial1.setPins(23, 22);` veya kart pinout'una göre doğru GPIO'yu yazıp tekrar dene.
+- **STM32 TX** → **ESP32 GPIO 16 (RX)**  
+- **ESP32 GPIO 17 (TX)** → **STM32 RX**  
+- **GND** ↔ **GND** (ortak toprak zorunlu)
+
+Baud: **115200**, format **8N1**. STM32 5V çıkış kullanıyorsa ESP32 3.3V uyumu için voltaj dönüştürücü veya bölücü kullanın (örn. **VOLTAJ_DONUSTURUCU.md**).
+
+**Sık hata:** STM32 TX’i ESP32 TX’e bağlamak. Veri almak için STM32 TX mutlaka ESP32 **RX (16)**’e gitmelidir.
+
+### 1.3. OLED (I2C)
+
+- **Feather SDA** → OLED SDA  
+- **Feather SCL** → OLED SCL  
+- **VCC** → 3.3V, **GND** → GND  
+
+Sürücü: SSD1306, adres 0x3C. Kütüphane: Adafruit SSD1306 + Adafruit GFX.
+
+### 1.4. Rotary Encoder (KY-040 veya benzeri)
+
+- **CLK** → GPIO 33  
+- **DT** → GPIO 12  
+- **SW** → GPIO 27  
+- **VCC** → 3.3V  
+- **GND** → GND  
+
+Tüm encoder pinleri kodda `INPUT_PULLUP`; harici pull-up gerekmez.
 
 ---
 
-## STM32 - Arduino Mega Serial2 Pin Bağlantıları (Eski kart)
+## 2. STM32 Tarafı (Kısa Özet)
 
-## Serial2 Pin Tanımları
-- **Arduino Mega TX2**: D16 (TX çıkışı)
-- **Arduino Mega RX2**: D17 (RX girişi)
+STM32, sensörleri (NTC, IR, gesture vb.) ve fan/RGB/TMC birimlerini yönetir. ESP32 yalnızca:
 
-## Bağlantı Şeması
+- **Veri isteği:** `$A\r\n` gönderir; STM32 cevaben `$VAL1,VAL2,...,VAL15\r\n` formatında satır döner.
+- **Komut gönderir:** Fan (`$F1`, `$F2`, `$F3`), RGB (`$LA...`), Fren (`$B0`/`$B1`).
 
-### 1. Arduino TX (D16) → STM32 RX (Voltaj Bölücü ile)
+Pin detayları ve protokol STM32 projesinde ve **SERI_HABERLESME.md** içinde tanımlıdır.
 
-```
-Arduino Mega D16 (TX2) 
-    |
-    |--[2.2kΩ]--+--[4.7kΩ]--GND
-    |           |
-    |        STM32 RX (3.41V)
-```
+---
 
-**Adım adım bağlantı:**
-1. **2.2kΩ direnç:**
-   - Bir ucu → Arduino Mega D16 pinine
-   - Diğer ucu → Ortak nokta (iki direncin birleştiği yer)
+## 3. Kontrol Listesi (ESP32 + STM32)
 
-2. **4.7kΩ direnç:**
-   - Bir ucu → Ortak nokta (2.2k ile birleşen yer)
-   - Diğer ucu → GND
+- [ ] STM32 TX → ESP32 RX (GPIO 16)
+- [ ] ESP32 TX (GPIO 17) → STM32 RX
+- [ ] GND ortak
+- [ ] Her iki tarafta baud 115200, 8N1
+- [ ] OLED I2C (SDA/SCL, 0x3C) bağlı
+- [ ] Encoder CLK=33, DT=12, SW=27, VCC/GND bağlı
 
-3. **STM32 RX:**
-   - Ortak noktaya bağlanır (2.2k ve 4.7k'ın birleştiği yer)
-   - Bu noktada voltaj: **~3.41V**
+---
 
-### 2. STM32 TX → Arduino RX (D17) - Direkt Bağlantı
+## 4. Eski Kart: Arduino Mega (Serial2) – Referans
 
-```
-STM32 TX (3.3V) -------- Arduino Mega D17 (RX2)
-                         (Direkt bağlantı, direnç YOK)
-```
+Proje artık **ESP32 Feather** ile sürüyor. Aşağıdaki bilgi yalnızca referans içindir.
 
-**Adım adım bağlantı:**
-- STM32 TX pininden direkt Arduino Mega D17 pinine bağlayın
-- **DİKKAT:** Burada voltaj bölücü YOK, direkt bağlantı!
-- Arduino Mega RX pinleri genellikle 5V tolerant'tır, 3.3V'u kabul eder
+### 4.1. Serial2 Pinleri (Mega)
 
-### 3. GND Bağlantısı (ÇOK ÖNEMLİ!)
+- **TX2:** D16 (STM32’ye giden)
+- **RX2:** D17 (STM32’den gelen)
 
-```
-Arduino Mega GND ←→ STM32 GND
-```
+### 4.2. Voltaj Uyumu (5V → 3.3V)
 
-**Mutlaka bağlanmalı:**
-- Arduino Mega'nın GND pininden STM32'nin GND pinine bağlayın
-- **Ortak toprak şart!** Yoksa haberleşme çalışmaz
+Arduino Mega TX (D16) 5V çıkış verir; STM32 RX 3.3V ise voltaj bölücü kullanılır:
 
-## Bağlantı Özeti
+- D16 → 2.2kΩ → ortak nokta → 4.7kΩ → GND  
+- STM32 RX → ortak nokta  
+- STM32 TX → Mega D17 (direkt, 3.3V genelde Mega RX için uygun)
 
-| Arduino Mega | Bağlantı | STM32 |
-|--------------|----------|-------|
-| D16 (TX2) | → [2.2kΩ] → [4.7kΩ] → GND | → RX (ortak nokta) |
-| D17 (RX2) | ← (direkt) | ← TX |
-| GND | ←→ | ←→ GND |
+GND mutlaka ortak olmalıdır.
 
-## Voltaj Seviyeleri
+---
 
-- **Arduino TX (D16)**: 5V (idle HIGH)
-- **Voltaj bölücü çıkışı**: ~3.41V (STM32 RX'e giden)
-- **STM32 TX**: 3.3V (idle HIGH)
-- **Arduino RX (D17)**: 3.3V alır (5V tolerant)
+## 5. Sorun Giderme
 
-## Kontrol Listesi
+**ESP32’de veri görünmüyorsa:**
 
-- [ ] Arduino D16 → 2.2kΩ → 4.7kΩ → GND bağlantısı yapıldı
-- [ ] STM32 RX → Voltaj bölücünün ortak noktasına bağlandı
-- [ ] STM32 TX → Arduino D17'e direkt bağlandı (direnç YOK)
-- [ ] Arduino GND ↔ STM32 GND bağlandı (ortak toprak)
-- [ ] Her iki tarafta da baud rate 115200
-- [ ] Her iki tarafta da 8N1 (8 data bits, no parity, 1 stop bit)
+1. STM32 TX’in ESP32 **RX (16)**’a gittiğini kontrol edin (TX–TX değil).  
+2. GND ortak mı kontrol edin.  
+3. Baud 115200, 8N1 her iki tarafta aynı mı bakın.  
+4. Serial Monitor’da `$A` gönderildikten sonra `$` ile başlayan satır geliyor mu izleyin (kod sadece `$` ile başlayan satırları işler).
 
-## Sorun Giderme
+**OLED açılmıyorsa:**
 
-**Veri gelmiyorsa kontrol edin:**
+- I2C adresini (0x3C / 0x3D) ve SDA/SCL bağlantısını kontrol edin.  
+- Kodda `SCREEN_ADDRESS 0x3C` kullanılıyor.
 
-1. **Multimetre ile voltaj ölçümü:**
-   - Arduino D16'da → ~5V olmalı
-   - Voltaj bölücü çıkışında → ~3.4V olmalı
-   - STM32 TX'te → ~3.3V olmalı
-   - Arduino D17'de → STM32 TX ile aynı voltaj olmalı
+**Encoder tepki vermiyorsa:**
 
-2. **GND bağlantısı:**
-   - Mutlaka ortak GND olmalı
-   - GND bağlantısı kopuk olabilir
-
-3. **Pin bağlantıları:**
-   - D16 ve D17 pinlerinin doğru olduğundan emin olun
-   - Başka bir pinle karışmış olabilir
-
-4. **Serial2 başlatma:**
-   - Kodda `Serial2.begin(115200)` çağrıldığından emin olun
-   - Baud rate her iki tarafta da aynı olmalı
-
-## Test
-
-1. Arduino kodunu yükleyin
-2. Serial Monitor'u açın (115200 baud)
-3. STM32'den veri gönderin
-4. Serial Monitor'da "D17 pin degisti" mesajlarını kontrol edin
-5. "Available" değerinin artıp artmadığını kontrol edin
+- CLK/DT/SW pinlerinin 33, 12, 27 olduğunu ve VCC/GND’in doğru bağlandığını kontrol edin.
