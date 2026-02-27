@@ -30,6 +30,8 @@
 #define NTC_SAMPLE_COUNT        20   // NTC testi icin alinacak olcum sayisi
 #define NTC_SAMPLE_INTERVAL_MS  100  // NTC testi sirasinda olcumler arasi bekleme (ms)
 #define NTC_TEST_TIMEOUT_MS    5000  // NTC testi max sure (ms), asilirsa FAIL
+#define NTC_STABILITY_DELTA_C   3.0f // NTC testi icin max izin verilen genel sapma (min-max farki, C)
+#define NTC_STEP_DELTA_C        0.7f // Iki ardil olcum arasinda izin verilen max fark (C)
 
 // OLED Ekran - 128x64, I2C
 #define SCREEN_WIDTH 128
@@ -178,9 +180,20 @@ bool  ntcTestRunning   = false;  // true iken 100 olcum toplanir
 int   ntcSampleCount   = 0;      // kac olcum alindi
 float ntcSampleSum     = 0.0f;   // olcumlerin toplami
 float ntcAverageTemp   = 0.0f;   // hesaplanan ortalama sicaklik
+float ntcMinTemp       = 0.0f;   // olcumler icindeki minimum sicaklik
+float ntcMaxTemp       = 0.0f;   // olcumler icindeki maksimum sicaklik
+float ntcLastTemp      = 0.0f;   // bir onceki olcum
+bool  ntcHasLastTemp   = false;  // onceki olcum var mi
 bool  ntcHasResult     = false;  // test tamamlandi mi
 bool  ntcStatusSuccess = false;  // true: SUCCESS, false: FAIL
 unsigned long ntcTestStartTime = 0; // testi baslatma zamani (ms)
+int   ntcSelection     = 0;      // 0: Test, 1: Cikis
+
+// IR Temp menusu durum degiskenleri
+bool  irHasResult   = false;   // son test yapildi mi
+float irLastTemp    = 0.0f;    // son testte okunan sicaklik
+int   irSelection   = 0;       // 0: Test, 1: Cikis
+bool  irStatusSuccess = false; // true: SUCCESS, false: FAIL
 
 static unsigned long lastRead = 0;
 static unsigned long lastButtonPress = 0;
@@ -221,6 +234,11 @@ void sendIntakeFanCommand();
 void sendExhaustFanCommand();
 void sendRGBLedCommand();
 void updateMenu();
+
+// Sensor durum sorgu fonksiyonlari ($X komutu)
+bool getSensorStatus(int &ntcStatus, int &irStatus);
+bool isNTCSensorOk();
+bool isIRSensorOk();
 
 // Helper fonksiyonlar - UI iyilestirmeleri
 void drawHeader(const char* title);
@@ -353,11 +371,38 @@ void readSTM32Data() {
         ntcHasResult     = true;
         ntcStatusSuccess = false;
       } else {
+        // Iki ardil olcum arasindaki farki kontrol et
+        if (ntcHasLastTemp) {
+          float stepDiff = plate_temp_raw - ntcLastTemp;
+          if (stepDiff < 0.0f) stepDiff = -stepDiff;
+          if (stepDiff > NTC_STEP_DELTA_C) {
+            // Bir onceki olcumden 0.7 C'den fazla sapma: hemen FAIL
+            ntcTestRunning   = false;
+            ntcHasResult     = true;
+            ntcStatusSuccess = false;
+            drawNTCScreen();
+            return;
+          }
+        }
+
+        ntcLastTemp    = plate_temp_raw;
+        ntcHasLastTemp = true;
+
+        // Istatistikleri guncelle (min, max, ortalama icin)
         ntcSampleSum   += plate_temp_raw;
         ntcSampleCount += 1;
+        if (ntcSampleCount == 1) {
+          ntcMinTemp = plate_temp_raw;
+          ntcMaxTemp = plate_temp_raw;
+        } else {
+          if (plate_temp_raw < ntcMinTemp) ntcMinTemp = plate_temp_raw;
+          if (plate_temp_raw > ntcMaxTemp) ntcMaxTemp = plate_temp_raw;
+        }
         if (ntcSampleCount >= NTC_SAMPLE_COUNT) {
           ntcAverageTemp   = ntcSampleSum / ntcSampleCount;
-          ntcStatusSuccess = (ntcAverageTemp >= 0.0f && ntcAverageTemp <= 100.0f);
+          float delta      = ntcMaxTemp - ntcMinTemp;
+          ntcStatusSuccess = (ntcAverageTemp >= 0.0f && ntcAverageTemp <= 100.0f &&
+                              delta <= NTC_STABILITY_DELTA_C);
           ntcHasResult     = true;
           ntcTestRunning   = false;
         }
@@ -551,18 +596,40 @@ void drawMenu() {
 
 void drawIRTempScreen() {
   display.clearDisplay();
-  drawHeader("IR Temp Sensor");
-  
-  // Deger ortada büyük fontla
-  char tempStr[16];
-  snprintf(tempStr, sizeof(tempStr), "%.1f C", resin_temp_raw);
-  drawCenteredText(28, tempStr, 2);
-  
-  // Alt bilgi
+  // Ustte "IR Temp" basligini ortala
+  drawCenteredText(0, "IR Temp", 1);
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
   display.setTextSize(1);
-  display.setCursor(0, 52);
-  display.print("Resin Temp");
-  
+  display.setCursor(0, 16);
+  display.print("Durum: ");
+  if (!irHasResult) {
+    display.print("BEKLEME");
+  } else {
+    display.print(irStatusSuccess ? "SUCCESS" : "FAIL");
+  }
+
+  display.setCursor(0, 28);
+  display.print("Deger: ");
+  if (irHasResult && irStatusSuccess) {
+    char tempStr[16];
+    snprintf(tempStr, sizeof(tempStr), "%.1f C", irLastTemp);
+    display.print(tempStr);
+  } else {
+    display.print("--.- C");
+  }
+
+  // Alt satir: Test / Cikis secenekleri
+  int y1 = 44;
+  display.setCursor(0, y1);
+  display.print(irSelection == 0 ? ">" : " ");
+  display.print(" Test icin tikla");
+
+  int y2 = 54;
+  display.setCursor(0, y2);
+  display.print(irSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
+
   display.display();
 }
 
@@ -594,11 +661,22 @@ void drawNTCScreen() {
   }
 
   if (ntcTestRunning) {
+    // Test devam ederken sadece bilgi mesaji goster
     drawCenteredText(44, "Olcum yapiliyor...", 1);
-  } else if (ntcHasResult) {
-    drawCenteredText(44, "Geri icin tikla", 1);
   } else {
-    drawCenteredText(44, "Test icin tikla", 1);
+    // Test bitmis veya hic baslamamis: altta secilebilir iki satir
+    // 0: Test icin tikla, 1: Cikis
+    display.setTextSize(1);
+
+    int y1 = 44;
+    display.setCursor(0, y1);
+    display.print(ntcSelection == 0 ? ">" : " ");
+    display.print(" Test icin tikla");
+
+    int y2 = 54;
+    display.setCursor(0, y2);
+    display.print(ntcSelection == 1 ? ">" : " ");
+    display.print(" Cikis");
   }
 
   display.display();
@@ -1427,6 +1505,22 @@ void updateMenu() {
       }
       drawProjeksiyonScreen();
       screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_NTC) {
+      // NTC ekraninda encoder ile alt secenekler (Test / Cikis) arasında gez
+      if (!ntcTestRunning) {
+        ntcSelection += diff;
+        if (ntcSelection < 0) ntcSelection = 1;
+        if (ntcSelection > 1) ntcSelection = 0;
+        drawNTCScreen();
+        screenNeedsUpdate = false;
+      }
+    } else if (currentMenu == MENU_IR_TEMP) {
+      // IR Temp ekraninda encoder ile alt secenekler (Test / Cikis) arasında gez
+      irSelection += diff;
+      if (irSelection < 0) irSelection = 1;
+      if (irSelection > 1) irSelection = 0;
+      drawIRTempScreen();
+      screenNeedsUpdate = false;
     }
     lastEncoderPos = encoderPos;
   }
@@ -1444,6 +1538,10 @@ void updateMenu() {
       // Menüden seçim yap
       if (menuSelection == 0) {
         currentMenu = MENU_IR_TEMP;
+        // IR Temp menusu icin durum sifirlama
+        irHasResult = false;
+        irLastTemp  = 0.0f;
+        irSelection = 0; // varsayilan secim: Test
         drawIRTempScreen();
       } else if (menuSelection == 1) {
         currentMenu = MENU_NTC;
@@ -1455,6 +1553,7 @@ void updateMenu() {
         ntcHasResult     = false;
         ntcStatusSuccess = false;
         ntcTestStartTime = 0;
+        ntcSelection     = 0; // varsayilan secim: Test
         drawNTCScreen();
       } else if (menuSelection == 2) {
         currentMenu = MENU_INTAKE_FAN;
@@ -1554,21 +1653,34 @@ void updateMenu() {
       }
     } else if (currentMenu == MENU_NTC) {
       // NTC menusu: buton islemleri
-      if (!ntcTestRunning && !ntcHasResult) {
-        // Testi baslat
-        ntcTestRunning   = true;
-        ntcSampleCount   = 0;
-        ntcSampleSum     = 0.0f;
-        ntcAverageTemp   = 0.0f;
-        ntcStatusSuccess = false;
-        ntcTestStartTime = millis();
-        drawNTCScreen();
-      } else if (!ntcTestRunning && ntcHasResult) {
-        // Sonuc gorundukten sonra butona basinca ana menuye don
-        ntcHasResult   = false;
-        ntcAverageTemp = 0.0f;
-        currentMenu    = MENU_MAIN;
-        drawMenu();
+      if (!ntcTestRunning) {
+        if (ntcSelection == 0) {
+          // Test icin tikla: once sensor durumunu kontrol et
+          if (!isNTCSensorOk()) {
+            ntcTestRunning   = false;
+            ntcHasResult     = true;
+            ntcStatusSuccess = false;
+            drawNTCScreen();
+          } else {
+            // Sensor saglam ise NTC testini bastan baslat
+            ntcTestRunning   = true;
+            ntcSampleCount   = 0;
+            ntcSampleSum     = 0.0f;
+            ntcAverageTemp   = 0.0f;
+            ntcMinTemp       = 0.0f;
+            ntcMaxTemp       = 0.0f;
+            ntcLastTemp      = 0.0f;
+            ntcHasLastTemp   = false;
+            ntcHasResult     = false;
+            ntcStatusSuccess = true; // baslangicta OK, olcumler bozar ise FAIL olur
+            ntcTestStartTime = millis();
+            drawNTCScreen();
+          }
+        } else if (ntcSelection == 1) {
+          // Cikis: ana menuye don
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
       }
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_INTAKE_FAN) {
@@ -1604,6 +1716,25 @@ void updateMenu() {
       // Butona basinca ana menuye don
       currentMenu = MENU_MAIN;
       drawMenu();
+    } else if (currentMenu == MENU_IR_TEMP) {
+      // IR Temp menusu: buton islemleri
+      if (irSelection == 0) {
+        // Test icin tikla: once IR sensor durumunu kontrol et
+        if (!isIRSensorOk()) {
+          irHasResult     = true;
+          irStatusSuccess = false;
+          drawIRTempScreen();
+        } else {
+          irLastTemp      = resin_temp_raw;
+          irHasResult     = true;
+          irStatusSuccess = true;
+          drawIRTempScreen();
+        }
+      } else if (irSelection == 1) {
+        // Cikis: ana menuye don
+        currentMenu = MENU_MAIN;
+        drawMenu();
+      }
     } else if (currentMenu == MENU_Z_REF || currentMenu == MENU_Y_REF || 
                currentMenu == MENU_CVR1_REF || currentMenu == MENU_CVR2_REF) {
       // TMC Ref ekranlarindan butona basinca ana menuye don
@@ -1797,6 +1928,93 @@ void drawCurrentScreen() {
   if (currentMenu >= 0 && currentMenu < sizeof(drawScreenFunctions) / sizeof(drawScreenFunctions[0])) {
     drawScreenFunctions[currentMenu]();
   }
+}
+
+// $X komutu ile NTC ve IR sensor durumlarini oku
+bool getSensorStatus(int &ntcStatus, int &irStatus) {
+  ntcStatus = 1;
+  irStatus  = 1;
+
+  Serial1.print("$X\r\n");
+  Serial1.flush();
+
+  char buffer[32];
+  int index = 0;
+  unsigned long startTime = millis();
+  bool lineComplete = false;
+
+  while (millis() - startTime < READ_TIMEOUT_MS && index < (int)sizeof(buffer) - 1) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      if (c == '\r' || c == '\n') {
+        if (index > 0) {
+          buffer[index] = '\0';
+          lineComplete = true;
+          break;
+        }
+      } else if (c >= 32 && c < 127) {
+        buffer[index++] = c;
+      }
+    }
+  }
+
+  if (!lineComplete) return false;
+  if (buffer[0] != '$') return false;
+
+  int values[2] = {0, 0};
+  int valueIndex = 0;
+  int numValue = 0;
+  bool inNumber = false;
+
+  for (int i = 1; i <= index; i++) {
+    char c = (i < index) ? buffer[i] : '\0';
+    if (c >= '0' && c <= '9') {
+      numValue = numValue * 10 + (c - '0');
+      inNumber = true;
+    } else if (c == ',' || c == '\0' || c == '\r' || c == '\n') {
+      if (inNumber && valueIndex < 2) {
+        values[valueIndex++] = numValue;
+        numValue = 0;
+        inNumber = false;
+      }
+      if (c == '\0' || c == '\r' || c == '\n') break;
+    }
+  }
+
+  if (inNumber && valueIndex < 2) {
+    values[valueIndex++] = numValue;
+  }
+
+  if (valueIndex < 2) return false;
+
+  ntcStatus = values[0];
+  irStatus  = values[1];
+
+  // Debug: $X cevabini ve parse edilen status degerlerini goster
+  Serial.print("X cevabi: ");
+  Serial.println(buffer);
+  Serial.print("NTC status = ");
+  Serial.print(ntcStatus);
+  Serial.print(" , IR status = ");
+  Serial.println(irStatus);
+
+  return true;
+}
+
+bool isNTCSensorOk() {
+  int ntcStatus = 1, irStatus = 1;
+  if (!getSensorStatus(ntcStatus, irStatus)) {
+    return false;
+  }
+  return ntcStatus == 0;
+}
+
+bool isIRSensorOk() {
+  int ntcStatus = 1, irStatus = 1;
+  if (!getSensorStatus(ntcStatus, irStatus)) {
+    return false;
+  }
+  return irStatus == 0;
 }
 
 void loop() {
