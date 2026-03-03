@@ -105,6 +105,27 @@ Kaynak: **`src/main.cpp`**
 
 ---
 
+## Seri Haberleşme Özeti
+
+ESP32 ile STM32 arasındaki tüm iletişim **UART üzerinden metin tabanlı komutlar** ile yapılır. Aşağıdaki tabloda temel komutlar ve anlamları özetlenmiştir:
+
+| Komut | Yön | Açıklama | Örnek Cevap / Not |
+|-------|-----|----------|-------------------|
+| `$A`  | ESP32 → STM32 | Anlık telemetri isteği (sensörler, RPM, TMC, gesture) | `$258,307,242,0,0,0,0,0,1,1,1,1,1,1,1` |
+| `$X`  | ESP32 → STM32 | Sensör/fan/status isteği (NTC, IR, fan error, gesture, projeksiyon, force) | `$0,1,0,0,0,0,0,1` |
+| `$F1` / `$F2` | ESP32 → STM32 | Intake fan 1/2 hız komutu (0–1999) | `$F1550\r\n` (yaklaşık %25) |
+| `$F3` | ESP32 → STM32 | Exhaust fan hız komutu (0–1999) | `$F31000\r\n` (~%50) |
+| `$LA` | ESP32 → STM32 | RGB LED HSV komutu | `$LA320,100,100\r\n` |
+| `$B0` / `$B1` | ESP32 → STM32 | Fren motoru kapalı / açık | `$B0` = pasif, `$B1` = aktif |
+| `$P0` / `$P1` | ESP32 → STM32 | Projeksiyon LED OFF / ON | `$P0\r\n`, `$P1\r\n` |
+| `$PF` | ESP32 → STM32 | Projeksiyon “force OFF” (test öncesi kapatma) | Her projeksiyon testinde önce gönderilir |
+| `$PC` | ESP32 → STM32 | Projeksiyon LED akım değeri | `$PC512\r\n` (örnek) |
+| `$I`  | ESP32 → STM32 | Konfigürasyon komutu (gesture sensör + projeksiyon) | Gesture/Projeksiyon test akışında kullanılır |
+
+> Tam alan listesi ve ayrıntılı zamanlama için ayrıca `SERI_HABERLESME.md` dokümanına bakılmalıdır.
+
+---
+
 ## Menü Sistemi
 
 | # | Menü | İçerik | Encoder | Buton |
