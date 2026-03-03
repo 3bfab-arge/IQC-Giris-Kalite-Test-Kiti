@@ -20,9 +20,11 @@
 // En kotu (bir onceki okumadan hemen sonra veri uretildiyse):  ~ READ_INTERVAL_MS + READ_DELAY_MS + 50 = ~110ms
 #define READ_INTERVAL_MS   50   // Kac ms'de bir sensör verisi istenir (saniyede 20 istek)
 #define GESTURE_READ_MS    20   // Gesture ekranindayken daha sik oku (saniyede ~50 istek)
-#define READ_DELAY_MS      10   // $A gonderdikten sonra STM32 cevabi icin bekleme (ms)
+#define READ_DELAY_MS      12   // $A gonderdikten sonra STM32 cevabi icin bekleme (ms)
 #define READ_TIMEOUT_MS    150  // Cevap gelmezse en fazla bu kadar ms bekle (timeout)
 #define LOOP_DELAY_MS      5    // Her loop sonu bekleme (ms)
+#define BUTTON_DEBOUNCE_MS 450  // Buton basimlari arasi min sure (ms)
+#define SENSOR_STATUS_REFRESH_MS 100   // NTC/IR baglanti durumunu periyodik yenileme (ms)
 #define GESTURE_LOOP_DELAY_MS 2 // Gesture ekranindayken daha hizli dongu
 #define SCREEN_UPDATE_MS   50   // OLED yenileme araligi (ms)
 #define GESTURE_SCREEN_MS  30   // Gesture ekraninda daha sik yenile
@@ -32,6 +34,12 @@
 #define NTC_TEST_TIMEOUT_MS    5000  // NTC testi max sure (ms), asilirsa FAIL
 #define NTC_STABILITY_DELTA_C   3.0f // NTC testi icin max izin verilen genel sapma (min-max farki, C)
 #define NTC_STEP_DELTA_C        0.7f // Iki ardil olcum arasinda izin verilen max fark (C)
+// IR Temp test ozel parametreleri (NTC ile ayni mantik)
+#define IR_SAMPLE_COUNT         20   // IR testi icin alinacak olcum sayisi
+#define IR_SAMPLE_INTERVAL_MS   110  // IR testi sirasinda olcumler arasi bekleme (ms) - timing stabilitesi
+#define IR_TEST_TIMEOUT_MS     5000 // IR testi max sure (ms), asilirsa FAIL
+#define IR_STABILITY_DELTA_C    4.0f // IR testi icin max sapma (IR gurultulu olabilir, NTC'den gevsek)
+#define IR_STEP_DELTA_C         1.0f // Iki ardil olcum arasi max fark (C)
 
 // OLED Ekran - 128x64, I2C
 #define SCREEN_WIDTH 128
@@ -65,8 +73,16 @@ float plate_temp_raw = 0.0;
 float resin_temp_raw = 0.0;
 float intake1_fan_raw = 0.0;
 float intake2_fan_raw = 0.0;
-float exthaust_fan_raw = 0.0;
-int gesture_type = GESTURE_NONE; // 0-4 arasi
+float exhaust_fan_raw = 0.0;
+// $X ile gelen hata/status degerleri (0: OK, 1: HATA)
+int intake1_fan_error     = 0;
+int intake2_fan_error     = 0;
+int exhaust_fan_error     = 0;
+int gesture_sensor_status = 0; // 0: OK, 1: HATA
+int projector_sensor_status = 0; // 0: OK, 1: HATA
+int force_sensor_status = 0;     // 0: OK, 1: HATA
+int gesture_type          = GESTURE_NONE;      // STM32'den gelen anlik deger (0-4)
+int last_gesture_type     = GESTURE_NONE;      // Ekranda gosterilecek son valid deger
 
 // TMC Status degerleri (1 veya 0)
 int z_tmc_status_stop_r = 0;
@@ -169,11 +185,14 @@ long cvrMotorSpeedStepsPerS[3] = {0, 1600, 1600};   // mikrostep/s hiz
 int  cvrMotorParamSelection = 0;     // 0: Motor, 1: Durum, 2: Yon, 3: Mesafe, 4: Hiz, 5: Hareket, 6: Geri
 bool cvrMotorEditMode = false;       // false: satir secimi, true: deger ayarlama
 
-// Projeksiyon (LED) ayarlama degiskenleri
+// Projeksiyon (LED) ayarlama / test degiskenleri
 bool projeksiyonLedOn = false;       // $P1 ON / $P0 OFF
 int  projeksiyonAkim = 512;          // 91-1023, $PC<deger>
-int  projeksiyonParamSelection = 0;  // 0: Durum, 1: Akim, 2: Geri
-bool projeksiyonEditMode = false;    // false: satir secimi, true: akim ayarlama
+// Projeksiyon test menusu durum degiskenleri
+bool projectorHasResult     = false; // test yapildi mi
+bool projectorStatusSuccess = false; // true: SUCCESS, false: FAIL
+int  projectorSelection     = 0;     // 0: LED, 1: Akim, 2: Test, 3: Cikis
+bool projectorEditMode      = false; // true: Akim ayarlama modu
 
 // NTC test menusu durum degiskenleri
 bool  ntcTestRunning   = false;  // true iken 100 olcum toplanir
@@ -188,15 +207,35 @@ bool  ntcHasResult     = false;  // test tamamlandi mi
 bool  ntcStatusSuccess = false;  // true: SUCCESS, false: FAIL
 unsigned long ntcTestStartTime = 0; // testi baslatma zamani (ms)
 int   ntcSelection     = 0;      // 0: Test, 1: Cikis
+int   ntcSensorStatus  = -1;     // $X komutundan gelen ham NTC status degeri
+bool  ntcSensorStatusValid = false; // $X cevabi alindiysa true
+bool  ntcSensorDisconnected = false; // status=1 iken true, ekranda "FAIL"
 
 // IR Temp menusu durum degiskenleri
-bool  irHasResult   = false;   // son test yapildi mi
-float irLastTemp    = 0.0f;    // son testte okunan sicaklik
-int   irSelection   = 0;       // 0: Test, 1: Cikis
-bool  irStatusSuccess = false; // true: SUCCESS, false: FAIL
+bool  irHasResult      = false;   // son test yapildi mi
+int   irSelection      = 0;       // 0: Test, 1: Cikis
+bool  irStatusSuccess  = false;  // true: SUCCESS, false: FAIL
+bool  irTestRunning    = false;  // true iken 20 olcum toplanir
+int   irSampleCount    = 0;      // kac olcum alindi
+float irSampleSum      = 0.0f;   // olcumlerin toplami
+float irAverageTemp    = 0.0f;   // hesaplanan ortalama sicaklik
+float irMinTemp        = 0.0f;   // min sicaklik
+float irMaxTemp        = 0.0f;   // max sicaklik
+float irLastTempStep   = 0.0f;   // bir onceki olcum (ardil fark kontrolu icin)
+bool  irHasLastTemp    = false;   // onceki olcum var mi
+unsigned long irTestStartTime = 0;      // testi baslatma zamani (ms)
+int   irSensorStatus   = -1;     // $X komutundan gelen ham IR status degeri
+bool  irSensorStatusValid = false; // $X cevabi alindiysa true
+bool  irSensorDisconnected = false; // status=1 iken true, ekranda "FAIL"
+
+// Gesture menusu durum degiskenleri
+bool  gestureHasResult     = false;  // test yapildi mi
+bool  gestureStatusSuccess = false;  // true: SUCCESS, false: FAIL
+int   gestureSelection     = 0;      // 0: Test, 1: Cikis
 
 static unsigned long lastRead = 0;
 static unsigned long lastButtonPress = 0;
+static unsigned long lastSensorStatusCheck = 0;
 
 // Forward declaration
 void readSTM32Data();
@@ -233,6 +272,7 @@ void sendCVRMotorMove(int motor);
 void sendIntakeFanCommand();
 void sendExhaustFanCommand();
 void sendRGBLedCommand();
+void sendGestureInit();
 void updateMenu();
 
 // Sensor durum sorgu fonksiyonlari ($X komutu)
@@ -295,6 +335,11 @@ void setup() {
 
 // STM32'den veri oku ve parse et
 void readSTM32Data() {
+  // Once buffer'daki eski/karisik veriyi temizle (getSensorStatus veya onceki okumadan kalma)
+  while (Serial1.available()) {
+    Serial1.read();
+  }
+
   // $A\r\n gonder
   Serial1.print("$A\r\n");
   Serial1.flush();
@@ -363,6 +408,26 @@ void readSTM32Data() {
     plate_temp_raw = values[2] / 10.0;
     resin_temp_raw = values[3] / 10.0;
 
+    // NTC/IR baglanti durumu: $A verisinden aninda tespit (50ms'de bir - ekran guncellemesi icin)
+    if (currentMenu == MENU_NTC && !ntcTestRunning) {
+      if (plate_temp_raw < -20.0f || plate_temp_raw > 150.0f || plate_temp_raw == 255.0f) {
+        ntcSensorStatus = 1;
+        ntcSensorStatusValid = true;
+      } else if (plate_temp_raw >= 0.1f && plate_temp_raw <= 99.9f) {
+        ntcSensorStatus = 0;
+        ntcSensorStatusValid = true;
+      }
+      screenNeedsUpdate = true;
+    }
+    if (currentMenu == MENU_IR_TEMP && !irTestRunning) {
+      // Sadece BAGLI guncelle; YOK $A'dan set etme (IR gurultulu olabilir, yanlis FAIL onleme)
+      if (resin_temp_raw >= 0.0f && resin_temp_raw <= 99.9f) {
+        irSensorStatus = 0;
+        irSensorStatusValid = true;
+      }
+      screenNeedsUpdate = true;
+    }
+
     // NTC menusu icin 20 olcumluk test toplama (yalnizca plate_temp_raw kullanilir)
     if (currentMenu == MENU_NTC && ntcTestRunning) {
       // Aralik disi deger gorursek direkt FAIL
@@ -411,10 +476,51 @@ void readSTM32Data() {
       drawNTCScreen();
     }
 
+    // IR Temp menusu icin 20 olcumluk test toplama (resin_temp_raw - NTC ile ayni mantik)
+    if (currentMenu == MENU_IR_TEMP && irTestRunning) {
+      if (resin_temp_raw < 0.0f || resin_temp_raw > 100.0f) {
+        irTestRunning   = false;
+        irHasResult     = true;
+        irStatusSuccess = false;
+      } else {
+        if (irHasLastTemp) {
+          float stepDiff = resin_temp_raw - irLastTempStep;
+          if (stepDiff < 0.0f) stepDiff = -stepDiff;
+          if (stepDiff > IR_STEP_DELTA_C) {
+            irTestRunning   = false;
+            irHasResult     = true;
+            irStatusSuccess = false;
+            drawIRTempScreen();
+            return;
+          }
+        }
+        irLastTempStep = resin_temp_raw;
+        irHasLastTemp  = true;
+        irSampleSum   += resin_temp_raw;
+        irSampleCount += 1;
+        if (irSampleCount == 1) {
+          irMinTemp = resin_temp_raw;
+          irMaxTemp = resin_temp_raw;
+        } else {
+          if (resin_temp_raw < irMinTemp) irMinTemp = resin_temp_raw;
+          if (resin_temp_raw > irMaxTemp) irMaxTemp = resin_temp_raw;
+        }
+        if (irSampleCount >= IR_SAMPLE_COUNT) {
+          irAverageTemp   = irSampleSum / irSampleCount;
+          float delta     = irMaxTemp - irMinTemp;
+          irStatusSuccess = (irAverageTemp >= 0.0f && irAverageTemp <= 100.0f &&
+                             delta <= IR_STABILITY_DELTA_C);
+          irHasResult     = true;
+          irTestRunning   = false;
+        }
+      }
+      drawIRTempScreen();
+    }
+
     if (valueIndex >= 7) {
       intake1_fan_raw = values[4] / 10.0;
       intake2_fan_raw = values[5] / 10.0;
-      exthaust_fan_raw = values[6] / 10.0;
+      exhaust_fan_raw = values[6] / 10.0;
     }
     
     if (valueIndex >= 8) {
@@ -422,9 +528,13 @@ void readSTM32Data() {
       if (gesture_type < GESTURE_NONE || gesture_type > GESTURE_RIGHT) {
         gesture_type = GESTURE_NONE;
       }
-      // Gesture ekranindaysak hemen ciz (gecikmesiz, loop beklemeden)
+      // NONE disindaki son valid degeri ekranda tut
+      if (gesture_type != GESTURE_NONE) {
+        last_gesture_type = gesture_type;
+      }
+      // Ekranin ne zaman cizilecegini loop() belirlesin
       if (currentMenu == MENU_GESTURE) {
-        drawGestureScreen();
+        screenNeedsUpdate = true;
       }
     }
     
@@ -461,7 +571,7 @@ void readSTM32Data() {
                      buffer, mcu_load_raw, pcb_temp_raw, plate_temp_raw, resin_temp_raw);
     if (valueIndex >= 7)
       n += snprintf(line + n, sizeof(line) - n, " %.1f %.1f %.1f",
-                    intake1_fan_raw, intake2_fan_raw, exthaust_fan_raw);
+                    intake1_fan_raw, intake2_fan_raw, exhaust_fan_raw);
     if (valueIndex >= 8)
       n += snprintf(line + n, sizeof(line) - n, " g%d", gesture_type);
     if (valueIndex >= 9)
@@ -596,46 +706,53 @@ void drawMenu() {
 
 void drawIRTempScreen() {
   display.clearDisplay();
-  // Ustte "IR Temp" basligini ortala
   drawCenteredText(0, "IR Temp", 1);
   display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
 
   display.setTextSize(1);
   display.setCursor(0, 16);
   display.print("Durum: ");
-  if (!irHasResult) {
-    display.print("BEKLEME");
-  } else {
+  if (irTestRunning) {
+    display.print("TESTING");
+  } else if (irSensorDisconnected) {
+    display.print("FAIL");
+  } else if (irHasResult) {
     display.print(irStatusSuccess ? "SUCCESS" : "FAIL");
+  } else {
+    display.print("BEKLEME");
   }
 
-  display.setCursor(0, 28);
+  display.setCursor(0, 26);
   display.print("Deger: ");
-  if (irHasResult && irStatusSuccess) {
+  if (irSensorDisconnected) {
+    display.print("0.0 C");
+  } else if (irHasResult) {
     char tempStr[16];
-    snprintf(tempStr, sizeof(tempStr), "%.1f C", irLastTemp);
+    snprintf(tempStr, sizeof(tempStr), "%.1f C", irAverageTemp);
     display.print(tempStr);
   } else {
     display.print("--.- C");
   }
 
-  // Alt satir: Test / Cikis secenekleri
-  int y1 = 44;
-  display.setCursor(0, y1);
-  display.print(irSelection == 0 ? ">" : " ");
-  display.print(" Test icin tikla");
+  if (irTestRunning) {
+    drawCenteredText(38, "Olcum yapiliyor...", 1);
+  } else {
+    int y1 = 38;
+    display.setCursor(0, y1);
+    display.print(irSelection == 0 ? ">" : " ");
+    display.print(" Test icin tikla");
 
-  int y2 = 54;
-  display.setCursor(0, y2);
-  display.print(irSelection == 1 ? ">" : " ");
-  display.print(" Cikis");
+    int y2 = 48;
+    display.setCursor(0, y2);
+    display.print(irSelection == 1 ? ">" : " ");
+    display.print(" Cikis");
+  }
 
   display.display();
 }
 
 void drawNTCScreen() {
   display.clearDisplay();
-  // Ustte "NTC Test" basligini ortala
   drawCenteredText(0, "NTC Test", 1);
   display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
 
@@ -644,15 +761,19 @@ void drawNTCScreen() {
   display.print("Durum: ");
   if (ntcTestRunning) {
     display.print("TESTING");
+  } else if (ntcSensorDisconnected) {
+    display.print("FAIL");
   } else if (ntcHasResult) {
     display.print(ntcStatusSuccess ? "SUCCESS" : "FAIL");
   } else {
     display.print("BEKLEME");
   }
 
-  display.setCursor(0, 28);
+  display.setCursor(0, 26);
   display.print("Deger: ");
-  if (ntcHasResult) {
+  if (ntcSensorDisconnected) {
+    display.print("0.0 C");
+  } else if (ntcHasResult) {
     char tempStr[16];
     snprintf(tempStr, sizeof(tempStr), "%.1f C", ntcAverageTemp);
     display.print(tempStr);
@@ -661,19 +782,15 @@ void drawNTCScreen() {
   }
 
   if (ntcTestRunning) {
-    // Test devam ederken sadece bilgi mesaji goster
-    drawCenteredText(44, "Olcum yapiliyor...", 1);
+    drawCenteredText(38, "Olcum yapiliyor...", 1);
   } else {
-    // Test bitmis veya hic baslamamis: altta secilebilir iki satir
-    // 0: Test icin tikla, 1: Cikis
     display.setTextSize(1);
-
-    int y1 = 44;
+    int y1 = 38;
     display.setCursor(0, y1);
     display.print(ntcSelection == 0 ? ">" : " ");
     display.print(" Test icin tikla");
 
-    int y2 = 54;
+    int y2 = 48;
     display.setCursor(0, y2);
     display.print(ntcSelection == 1 ? ">" : " ");
     display.print(" Cikis");
@@ -688,21 +805,35 @@ void drawGestureScreen() {
   
   // Gesture ismi ve degeri
   const char* gestureNames[] = {"NONE", "UP", "DOWN", "LEFT", "RIGHT"};
-  int g = gesture_type;
+  int g = last_gesture_type;
   if (g < 0 || g > 4) g = 0;
   
-  // Gesture adı merkezde büyük fontla
-  display.setTextSize(2);
-  display.setCursor(0, 24);
-  display.print(gestureNames[g]);
-  
-  // Alt bilgi
+  // Durum satiri
   display.setTextSize(1);
-  display.setCursor(0, 48);
-  display.print("Type: ");
-  display.print(gesture_type);
-  display.print(" / ");
+  display.setCursor(0, 16);
+  display.print("Durum: ");
+  if (gestureHasResult) {
+    display.print(gestureStatusSuccess ? "SUCCESS" : "FAIL");
+  } else {
+    display.print("BEKLEME");
+  }
+
+  // Gesture adı merkezde büyük fontla (son gelen deger ekranda kalir)
+  display.setTextSize(2);
+  display.setCursor(0, 28);
   display.print(gestureNames[g]);
+
+  // Alt bilgi: Test / Cikis secenekleri
+  display.setTextSize(1);
+  int y1 = 50;
+  display.setCursor(0, y1);
+  display.print(gestureSelection == 0 ? ">" : " ");
+  display.print(" Test icin tikla");
+
+  int y2 = 58;
+  display.setCursor(0, y2);
+  display.print(gestureSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
   
   display.display();
 }
@@ -1101,34 +1232,41 @@ void drawProjeksiyonScreen() {
   display.clearDisplay();
   drawHeader("Projeksiyon (LED)");
 
-  const int rowCount = 3;
-  int selected = projeksiyonParamSelection;
-  if (selected < 0) selected = 0;
-  if (selected >= rowCount) selected = rowCount - 1;
-
-  for (int row = 0; row < rowCount; row++) {
-    int y = 18 + row * 9;
-    display.setCursor(0, y);
-    if (row == selected) {
-      display.print(">");
-    } else {
-      display.print(" ");
-    }
-    display.setCursor(6, y);
-
-    if (row == 0) {
-      display.print("Durum: ");
-      display.print(projeksiyonLedOn ? "ACIK" : "KAPALI");
-    } else if (row == 1) {
-      display.print("Akim  : ");
-      display.print(projeksiyonAkim);
-      if (projeksiyonEditMode) display.print(" *");
-    } else if (row == 2) {
-      display.print("Geri");
-    }
-
-    y += 9;
+  // Durum satiri
+  display.setTextSize(1);
+  display.setCursor(0, 16);
+  display.print("Durum: ");
+  if (projectorHasResult) {
+    display.print(projectorStatusSuccess ? "SUCCESS" : "FAIL");
+  } else {
+    display.print("BEKLEME");
   }
+
+  // Menu satirlari: LED / Akim / Test / Cikis
+  int y = 28;
+  display.setCursor(0, y);
+  display.print(projectorSelection == 0 ? ">" : " ");
+  display.print("LED : ");
+  display.print(projeksiyonLedOn ? "ACIK" : "KAPALI");
+
+  y += 10;
+  display.setCursor(0, y);
+  display.print(projectorSelection == 1 ? ">" : " ");
+  display.print("Akim: ");
+  display.print(projeksiyonAkim);
+  if (projectorEditMode && projectorSelection == 1) {
+    display.print(" *");
+  }
+
+  y += 10;
+  display.setCursor(0, y);
+  display.print(projectorSelection == 2 ? ">" : " ");
+  display.print("Test icin tikla");
+
+  y += 10;
+  display.setCursor(0, y);
+  display.print(projectorSelection == 3 ? ">" : " ");
+  display.print("Cikis");
 
   display.display();
 }
@@ -1164,6 +1302,25 @@ void drawIntakeFanScreen() {
   display.print("F2: ");
   display.print(intake2_fan_raw, 1);
   display.print(" RPM");
+
+  // Fan donus hatasi durumlari
+  bool f1Error = (intake1_fan_error == 1);
+  bool f2Error = (intake2_fan_error == 1);
+  // %100 gucte iken beklenen min RPM saglanmiyorsa da hata say
+  if (fanSpeedPercent == 100 && intake1_fan_raw <= 2500.0f) {
+    f1Error = true;
+  }
+  if (fanSpeedPercent == 100 && intake2_fan_raw <= 2500.0f) {
+    f2Error = true;
+  }
+  display.setCursor(80, 42);
+  if (f1Error) {
+    display.print("HATA");
+  }
+  display.setCursor(80, 52);
+  if (f2Error) {
+    display.print("HATA");
+  }
   
   display.display();
 }
@@ -1192,7 +1349,18 @@ void drawExhaustFanScreen() {
   display.setTextSize(1);
   display.setCursor(0, 42);
   display.print("RPM: ");
-  display.print(exthaust_fan_raw, 1);
+  display.print(exhaust_fan_raw, 1);
+
+  // Fan donus hatasi durumu
+  bool exhError = (exhaust_fan_error == 1);
+  // %100 gucte iken beklenen min RPM saglanmiyorsa da hata say
+  if (exhaustFanSpeedPercent == 100 && exhaust_fan_raw <= 2500.0f) {
+    exhError = true;
+  }
+  display.setCursor(0, 52);
+  if (exhError) {
+    display.print("HATA VAR");
+  }
   
   display.display();
 }
@@ -1284,6 +1452,13 @@ void sendRGBLedCommand() {
   rgbCommandSent = true;
 }
 
+// Gesture sensör konfigürasyon komutu ($I)
+void sendGestureInit() {
+  Serial1.print("$I\r\n");
+  Serial1.flush();
+  Serial.println("Gesture init: $I\\r\\n");
+}
+
 // Intake fan komutlarini gonder
 void sendIntakeFanCommand() {
   // Format: $F1550\r\n ($ + F + fan_no + hiz)
@@ -1348,6 +1523,7 @@ void updateMenu() {
       if (fanSpeedPercent > 100) fanSpeedPercent = 100;
       // Encoder her cevrildiginde otomatik komut gonder
       sendIntakeFanCommand();
+      delay(100); // Her kademe icin debounce gecikmesi
       drawIntakeFanScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_EXHAUST_FAN) {
@@ -1357,6 +1533,7 @@ void updateMenu() {
       if (exhaustFanSpeedPercent > 100) exhaustFanSpeedPercent = 100;
       // Encoder her cevrildiginde otomatik komut gonder
       sendExhaustFanCommand();
+      delay(100); // Her kademe icin debounce gecikmesi
       drawExhaustFanScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_RGB_LED) {
@@ -1491,17 +1668,18 @@ void updateMenu() {
       drawCVRMotorScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_PROJEKSIYON) {
-      // Projeksiyon ekraninda encoder: satir secimi veya akim ayari
-      if (!projeksiyonEditMode) {
-        projeksiyonParamSelection += diff;
-        if (projeksiyonParamSelection < 0) projeksiyonParamSelection = 2;
-        if (projeksiyonParamSelection > 2) projeksiyonParamSelection = 0;
-      } else {
-        // Akim satirinda: 0-1023, ornek adim 10
+      // Projeksiyon ekraninda: menu secimi veya akim ayarlama
+      if (projectorEditMode && projectorSelection == 1) {
+        // Akim ayarlama modu
         projeksiyonAkim += diff * 10;
         if (projeksiyonAkim < 91) projeksiyonAkim = 91;
         if (projeksiyonAkim > 1023) projeksiyonAkim = 1023;
         sendProjeksiyonCurrent();
+      } else {
+        // Menu secimi: LED / Akim / Test / Cikis
+        projectorSelection += diff;
+        if (projectorSelection < 0) projectorSelection = 3;
+        if (projectorSelection > 3) projectorSelection = 0;
       }
       drawProjeksiyonScreen();
       screenNeedsUpdate = false;
@@ -1515,11 +1693,19 @@ void updateMenu() {
         screenNeedsUpdate = false;
       }
     } else if (currentMenu == MENU_IR_TEMP) {
-      // IR Temp ekraninda encoder ile alt secenekler (Test / Cikis) arasında gez
-      irSelection += diff;
-      if (irSelection < 0) irSelection = 1;
-      if (irSelection > 1) irSelection = 0;
-      drawIRTempScreen();
+      if (!irTestRunning) {
+        irSelection += diff;
+        if (irSelection < 0) irSelection = 1;
+        if (irSelection > 1) irSelection = 0;
+        drawIRTempScreen();
+      }
+      screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_GESTURE) {
+      // Gesture ekraninda encoder ile alt secenekler (Test / Cikis) arasında gez
+      gestureSelection += diff;
+      if (gestureSelection < 0) gestureSelection = 1;
+      if (gestureSelection > 1) gestureSelection = 0;
+      drawGestureScreen();
       screenNeedsUpdate = false;
     }
     lastEncoderPos = encoderPos;
@@ -1530,18 +1716,29 @@ void updateMenu() {
   bool currentButtonState = digitalRead(ENCODER_SW);
   
   // Buton basıldı (HIGH -> LOW geçişi, pull-up olduğu için LOW = basılı)
-  if (lastButtonState == HIGH && currentButtonState == LOW && millis() - lastButtonPress > 300) {
+  if (lastButtonState == HIGH && currentButtonState == LOW && millis() - lastButtonPress > BUTTON_DEBOUNCE_MS) {
     lastButtonPress = millis();
-    delay(20); // Debounce
+    delay(25); // Donanim debounce
     
     if (currentMenu == MENU_MAIN) {
       // Menüden seçim yap
       if (menuSelection == 0) {
         currentMenu = MENU_IR_TEMP;
-        // IR Temp menusu icin durum sifirlama
-        irHasResult = false;
-        irLastTemp  = 0.0f;
-        irSelection = 0; // varsayilan secim: Test
+        irHasResult      = false;
+        irTestRunning    = false;
+        irSampleCount    = 0;
+        irSampleSum      = 0.0f;
+        irAverageTemp    = 0.0f;
+        irSelection      = 0;
+        irSensorStatus   = -1;
+        irSensorStatusValid = false;
+        int ntcStatusTemp = 0;
+        if (getSensorStatus(ntcStatusTemp, irSensorStatus)) {
+          irSensorStatusValid = true;
+          irSensorDisconnected = (irSensorStatus == 1);
+        }
+        lastSensorStatusCheck = millis();
+        delay(40);
         drawIRTempScreen();
       } else if (menuSelection == 1) {
         currentMenu = MENU_NTC;
@@ -1554,6 +1751,16 @@ void updateMenu() {
         ntcStatusSuccess = false;
         ntcTestStartTime = 0;
         ntcSelection     = 0; // varsayilan secim: Test
+        // Menüye girerken $X komutunu gonder ve NTC sensor durumunu oku
+        ntcSensorStatus      = -1;
+        ntcSensorStatusValid = false;
+        int irStatusTemp     = 0;
+        if (getSensorStatus(ntcSensorStatus, irStatusTemp)) {
+          ntcSensorStatusValid = true;
+          ntcSensorDisconnected = (ntcSensorStatus == 1);
+        }
+        lastSensorStatusCheck = millis();
+        delay(40);
         drawNTCScreen();
       } else if (menuSelection == 2) {
         currentMenu = MENU_INTAKE_FAN;
@@ -1581,6 +1788,14 @@ void updateMenu() {
         drawRGBLedScreen();
       } else if (menuSelection == 5) {
         currentMenu = MENU_GESTURE;
+        // Gesture menüsüne girerken sensörü konfigüre et ($I)
+        gesture_sensor_status = 0;
+        gestureHasResult      = false;
+        gestureStatusSuccess  = false;
+        gestureSelection      = 0; // Varsayilan: Test
+        last_gesture_type     = GESTURE_NONE;
+        sendGestureInit();
+        delay(40); // STM32'nin $I sonrasi hazir olmasi icin kisa bekleme
         drawGestureScreen();
       } else if (menuSelection == 6) {
         currentMenu = MENU_Z_REF;
@@ -1645,8 +1860,24 @@ void updateMenu() {
         currentMenu = MENU_PROJEKSIYON;
         projeksiyonLedOn = false;
         projeksiyonAkim = 512;
-        projeksiyonParamSelection = 0;
-        projeksiyonEditMode = false;
+        projectorHasResult     = false;
+        projectorStatusSuccess = false;
+        projectorSelection     = 0; // Varsayilan: LED satiri
+        projectorEditMode      = false;
+        // Baslangic sirasi: $PF -> 500ms -> $I -> $X
+        Serial1.print("$PF\r\n");
+        Serial1.flush();
+        Serial.println("Projeksiyon: $PF\\r\\n (OFF)");
+        delay(500);
+        // $I komutu projektoru de ayarlar
+        sendGestureInit();
+        delay(40);
+        int ntcDummy = 0;
+        int irDummy  = 0;
+        if (getSensorStatus(ntcDummy, irDummy)) {
+          projectorHasResult     = true;
+          projectorStatusSuccess = (projector_sensor_status == 0);
+        }
         encoderPos = 0;
         lastEncoderPos = 0;
         drawProjeksiyonScreen();
@@ -1656,11 +1887,22 @@ void updateMenu() {
       if (!ntcTestRunning) {
         if (ntcSelection == 0) {
           // Test icin tikla: once sensor durumunu kontrol et
-          if (!isNTCSensorOk()) {
+          bool sensorOk = false;
+
+          if (ntcSensorStatusValid) {
+            // Menüye girerken okunmus $X sonucunu kullan
+            sensorOk = (ntcSensorStatus == 0);
+          } else {
+            // Henuz okunmadiysa bir kez $X ile dene ve sonucu cache'le
+            sensorOk = isNTCSensorOk();
+            ntcSensorStatus      = sensorOk ? 0 : 1;
+            ntcSensorStatusValid = true;
+          }
+
+          if (!sensorOk) {
             ntcTestRunning   = false;
             ntcHasResult     = true;
             ntcStatusSuccess = false;
-            drawNTCScreen();
           } else {
             // Sensor saglam ise NTC testini bastan baslat
             ntcTestRunning   = true;
@@ -1674,8 +1916,9 @@ void updateMenu() {
             ntcHasResult     = false;
             ntcStatusSuccess = true; // baslangicta OK, olcumler bozar ise FAIL olur
             ntcTestStartTime = millis();
-            drawNTCScreen();
           }
+          // Sensor durum/NTC test bilgilerini ekrana yansıt
+          drawNTCScreen();
         } else if (ntcSelection == 1) {
           // Cikis: ana menuye don
           currentMenu = MENU_MAIN;
@@ -1713,28 +1956,65 @@ void updateMenu() {
         drawRGBLedScreen();
       }
     } else if (currentMenu == MENU_GESTURE) {
-      // Butona basinca ana menuye don
-      currentMenu = MENU_MAIN;
-      drawMenu();
-    } else if (currentMenu == MENU_IR_TEMP) {
-      // IR Temp menusu: buton islemleri
-      if (irSelection == 0) {
-        // Test icin tikla: once IR sensor durumunu kontrol et
-        if (!isIRSensorOk()) {
-          irHasResult     = true;
-          irStatusSuccess = false;
-          drawIRTempScreen();
+      // Gesture menusu: Test / Cikis
+      if (gestureSelection == 0) {
+        // TEST akisi
+        // 1) Sensörü yeniden konfigure et ($I)
+        sendGestureInit();
+        delay(40); // $I sonrasi kisa bekleme
+        // 2) $X ile durum kontrolu
+        int ntcDummy = 0;
+        int irDummy  = 0;
+        if (getSensorStatus(ntcDummy, irDummy)) {
+          // gesture_sensor_status global olarak guncellendi
+          gestureHasResult     = true;
+          gestureStatusSuccess = (gesture_sensor_status == 0);
         } else {
-          irLastTemp      = resin_temp_raw;
-          irHasResult     = true;
-          irStatusSuccess = true;
-          drawIRTempScreen();
+          // $X cevabi alinmazsa FAIL kabul et
+          gestureHasResult     = true;
+          gestureStatusSuccess = false;
         }
-      } else if (irSelection == 1) {
-        // Cikis: ana menuye don
+        drawGestureScreen();
+      } else if (gestureSelection == 1) {
+        // CIKIS: ana menuye don
         currentMenu = MENU_MAIN;
         drawMenu();
       }
+    } else if (currentMenu == MENU_IR_TEMP) {
+      if (!irTestRunning) {
+        if (irSelection == 0) {
+          // Test icin tikla: $A cache kullan ($X cagirmak $A ile cakisma yapiyor, arka arkaya test bozuluyor)
+          bool sensorOk = false;
+          if (irSensorStatusValid) {
+            sensorOk = (irSensorStatus == 0);
+          } else {
+            sensorOk = isIRSensorOk();
+            irSensorStatus      = sensorOk ? 0 : 1;
+            irSensorStatusValid = true;
+          }
+          if (!sensorOk) {
+            irHasResult     = true;
+            irStatusSuccess = false;
+          } else {
+            irTestRunning    = true;
+            irSampleCount    = 0;
+            irSampleSum      = 0.0f;
+            irAverageTemp    = 0.0f;
+            irMinTemp        = 0.0f;
+            irMaxTemp        = 0.0f;
+            irLastTempStep   = 0.0f;
+            irHasLastTemp    = false;
+            irHasResult      = false;
+            irStatusSuccess  = true;
+            irTestStartTime  = millis();
+          }
+          drawIRTempScreen();
+        } else if (irSelection == 1) {
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
+      }
+      screenNeedsUpdate = false;
     } else if (currentMenu == MENU_Z_REF || currentMenu == MENU_Y_REF || 
                currentMenu == MENU_CVR1_REF || currentMenu == MENU_CVR2_REF) {
       // TMC Ref ekranlarindan butona basinca ana menuye don
@@ -1864,30 +2144,47 @@ void updateMenu() {
         drawCVRMotorScreen();
       }
     } else if (currentMenu == MENU_PROJEKSIYON) {
-      // Projeksiyon ekraninda buton davranisi
-      if (!projeksiyonEditMode) {
-        if (projeksiyonParamSelection == 0) {
-          // Durum: LED ac/kapa
+      // Projeksiyon ekraninda: LED / Akim / Test / Cikis
+      if (projectorSelection == 0) {
+        // LED ac/kapa (sadece test SUCCESS ise izin ver)
+        if (projectorStatusSuccess) {
           projeksiyonLedOn = !projeksiyonLedOn;
           if (projeksiyonLedOn) {
             sendProjeksiyonOn();
           } else {
             sendProjeksiyonOff();
           }
-          drawProjeksiyonScreen();
-        } else if (projeksiyonParamSelection == 1) {
-          // Akim: deger ayarlama moduna gec
-          projeksiyonEditMode = true;
-          drawProjeksiyonScreen();
-        } else if (projeksiyonParamSelection == 2) {
-          // Geri: ana menuye don
-          currentMenu = MENU_MAIN;
-          drawMenu();
         }
-      } else {
-        // Akim ayarlama modundan cik
-        projeksiyonEditMode = false;
         drawProjeksiyonScreen();
+      } else if (projectorSelection == 1) {
+        // Akim: edit modunu ac/kapat
+        projectorEditMode = !projectorEditMode;
+        drawProjeksiyonScreen();
+      } else if (projectorSelection == 2) {
+        // TEST akisi:
+        // 1) Projektoru kapat: $PF
+        Serial1.print("$PF\r\n");
+        Serial1.flush();
+        Serial.println("Projeksiyon TEST: $PF\\r\\n (OFF)");
+        delay(500);
+        // 2) Config gonder: $I
+        sendGestureInit();
+        delay(40);
+        // 3) $X ile durum kontrolu
+        int ntcDummy = 0;
+        int irDummy  = 0;
+        if (getSensorStatus(ntcDummy, irDummy)) {
+          projectorHasResult     = true;
+          projectorStatusSuccess = (projector_sensor_status == 0);
+        } else {
+          projectorHasResult     = true;
+          projectorStatusSuccess = false;
+        }
+        drawProjeksiyonScreen();
+      } else if (projectorSelection == 3) {
+        // CIKIS: ana menuye don
+        currentMenu = MENU_MAIN;
+        drawMenu();
       }
     } else {
       // Diger detay ekranlarindan geri don
@@ -1930,10 +2227,21 @@ void drawCurrentScreen() {
   }
 }
 
-// $X komutu ile NTC ve IR sensor durumlarini oku
+// $X komutu ile NTC, IR, fan, gesture, projeksiyon ve force sensor durumlarini oku
 bool getSensorStatus(int &ntcStatus, int &irStatus) {
   ntcStatus = 1;
   irStatus  = 1;
+  exhaust_fan_error     = 0;
+  intake1_fan_error     = 0;
+  intake2_fan_error     = 0;
+  gesture_sensor_status = 0;
+  projector_sensor_status = 0;
+  force_sensor_status = 0;
+
+  // Once eski veriyi temizle ki sadece taze $X cevabini okuyalim
+  while (Serial1.available()) {
+    Serial1.read();
+  }
 
   Serial1.print("$X\r\n");
   Serial1.flush();
@@ -1961,7 +2269,18 @@ bool getSensorStatus(int &ntcStatus, int &irStatus) {
   if (!lineComplete) return false;
   if (buffer[0] != '$') return false;
 
-  int values[2] = {0, 0};
+  // Beklenen format:
+  // $ntc_sensor_status,
+  //  ir_sensor_status,
+  //  exhaust_fan_err,
+  //  intake1_fan_err,
+  //  intake2_fan_err,
+  //  gesture_sensor_status,
+  //  projector_sensor_status,
+  //  force_sensor_status
+  // Su an STM32 tarafindan 8 deger gonderiliyor: $0,1,0,0,0,0,0,1
+  //  0: ntc, 1: ir, 2: exhaust, 3: intake1, 4: intake2, 5: gesture, 6: projector, 7: force
+  int values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   int valueIndex = 0;
   int numValue = 0;
   bool inNumber = false;
@@ -1972,7 +2291,7 @@ bool getSensorStatus(int &ntcStatus, int &irStatus) {
       numValue = numValue * 10 + (c - '0');
       inNumber = true;
     } else if (c == ',' || c == '\0' || c == '\r' || c == '\n') {
-      if (inNumber && valueIndex < 2) {
+      if (inNumber && valueIndex < 8) {
         values[valueIndex++] = numValue;
         numValue = 0;
         inNumber = false;
@@ -1981,7 +2300,7 @@ bool getSensorStatus(int &ntcStatus, int &irStatus) {
     }
   }
 
-  if (inNumber && valueIndex < 2) {
+  if (inNumber && valueIndex < 8) {
     values[valueIndex++] = numValue;
   }
 
@@ -1989,6 +2308,12 @@ bool getSensorStatus(int &ntcStatus, int &irStatus) {
 
   ntcStatus = values[0];
   irStatus  = values[1];
+  if (valueIndex >= 3) exhaust_fan_error       = values[2];
+  if (valueIndex >= 4) intake1_fan_error       = values[3];
+  if (valueIndex >= 5) intake2_fan_error       = values[4];
+  if (valueIndex >= 6) gesture_sensor_status     = values[5];
+  if (valueIndex >= 7) projector_sensor_status   = values[6];
+  if (valueIndex >= 8) force_sensor_status       = values[7];
 
   // Debug: $X cevabini ve parse edilen status degerlerini goster
   Serial.print("X cevabi: ");
@@ -1996,7 +2321,24 @@ bool getSensorStatus(int &ntcStatus, int &irStatus) {
   Serial.print("NTC status = ");
   Serial.print(ntcStatus);
   Serial.print(" , IR status = ");
-  Serial.println(irStatus);
+  Serial.print(irStatus);
+  Serial.print(" , EXH err = ");
+  Serial.print(exhaust_fan_error);
+  Serial.print(" , IN1 err = ");
+  Serial.print(intake1_fan_error);
+  Serial.print(" , IN2 err = ");
+  Serial.print(intake2_fan_error);
+  Serial.print(" , GESTURE status = ");
+  Serial.print(gesture_sensor_status);
+  Serial.print(" , PROJ status = ");
+  Serial.print(projector_sensor_status);
+  Serial.print(" , FORCE status = ");
+  Serial.println(force_sensor_status);
+
+  // $X cevabindan arta kalan byte'lari temizle (sonraki $A okumasini bozmasin)
+  while (Serial1.available()) {
+    Serial1.read();
+  }
 
   return true;
 }
@@ -2024,12 +2366,14 @@ void loop() {
   unsigned long now = millis();
   
   // Sensör verisi: Gesture ekranindayken daha sik istek,
-  // NTC testi sirasinda daha seyrek (100ms), diger durumlarda standart READ_INTERVAL_MS
+  // NTC/IR testi sirasinda 100ms aralikla olcum
   unsigned long readInterval;
   if (currentMenu == MENU_GESTURE) {
     readInterval = GESTURE_READ_MS;
   } else if (currentMenu == MENU_NTC && ntcTestRunning) {
     readInterval = NTC_SAMPLE_INTERVAL_MS;
+  } else if (currentMenu == MENU_IR_TEMP && irTestRunning) {
+    readInterval = NTC_SAMPLE_INTERVAL_MS;  // NTC ile ayni: 100ms
   } else {
     readInterval = READ_INTERVAL_MS;
   }
@@ -2050,14 +2394,86 @@ void loop() {
     drawCurrentScreen();
   }
 
-  // NTC testi icin timeout kontrolu:
-  // Belirli sure icinde yeterli olcum gelmezse eldeki orneklerle ortalama al,
-  // aralik disina cikarsa veya hic ornek yoksa FAIL olarak sonlandir.
+  // NTC/IR sensör, fan, gesture ve projeksiyon hata durumunu periyodik yenile (test calisirken degil)
+  if (now - lastSensorStatusCheck >= SENSOR_STATUS_REFRESH_MS) {
+    if (currentMenu == MENU_NTC && !ntcTestRunning) {
+      int irStatusTemp = 0;
+      if (getSensorStatus(ntcSensorStatus, irStatusTemp)) {
+        ntcSensorStatusValid = true;
+        ntcSensorDisconnected = (ntcSensorStatus == 1);
+      }
+      lastSensorStatusCheck = now;
+      delay(40);
+      drawNTCScreen();
+    } else if (currentMenu == MENU_IR_TEMP && !irTestRunning) {
+      int ntcStatusTemp = 0;
+      if (getSensorStatus(ntcStatusTemp, irSensorStatus)) {
+        irSensorStatusValid = true;
+        irSensorDisconnected = (irSensorStatus == 1);
+      }
+      lastSensorStatusCheck = now;
+      delay(40);
+      drawIRTempScreen();
+    } else if (currentMenu == MENU_INTAKE_FAN) {
+      // Intake fan menüsünde $X ile fan hata durumunu da guncelle
+      int ntcDummy = 0;
+      int irDummy  = 0;
+      if (getSensorStatus(ntcDummy, irDummy)) {
+        // exhaust_fan_error, intake1_fan_error, intake2_fan_error global olarak guncellendi
+        bool f1Error = (intake1_fan_error == 1);
+        bool f2Error = (intake2_fan_error == 1);
+        if (fanSpeedPercent == 100) {
+          if (intake1_fan_raw <= 2500.0f) f1Error = true;
+          if (intake2_fan_raw <= 2500.0f) f2Error = true;
+        }
+        // Herhangi bir hata varsa intake fanlari durdur (hizi %0'a cek)
+        if ((f1Error || f2Error) && fanSpeedPercent != 0) {
+          fanSpeedPercent = 0;
+          sendIntakeFanCommand();
+        }
+      }
+      lastSensorStatusCheck = now;
+      delay(40);
+      drawIntakeFanScreen();
+    } else if (currentMenu == MENU_EXHAUST_FAN) {
+      // Exhaust fan menüsünde $X ile fan hata durumunu da guncelle
+      int ntcDummy = 0;
+      int irDummy  = 0;
+      if (getSensorStatus(ntcDummy, irDummy)) {
+        // exhaust_fan_error, intake1_fan_error, intake2_fan_error global olarak guncellendi
+        bool exhError = (exhaust_fan_error == 1);
+        if (exhaustFanSpeedPercent == 100 && exhaust_fan_raw <= 2500.0f) {
+          exhError = true;
+        }
+        // Hata varsa exhaust fan'i durdur (hizi %0'a cek)
+        if (exhError && exhaustFanSpeedPercent != 0) {
+          exhaustFanSpeedPercent = 0;
+          sendExhaustFanCommand();
+        }
+      }
+      lastSensorStatusCheck = now;
+      delay(40);
+      drawExhaustFanScreen();
+    } else if (currentMenu == MENU_PROJEKSIYON) {
+      // Projeksiyon menüsünde $X ile projeksiyon sensor status de guncelle
+      int ntcDummy = 0;
+      int irDummy  = 0;
+      if (getSensorStatus(ntcDummy, irDummy)) {
+        // projector_sensor_status global olarak guncellendi
+        screenNeedsUpdate = true;
+      }
+      lastSensorStatusCheck = now;
+      delay(40);
+    } else {
+      lastSensorStatusCheck = now;
+    }
+  }
+
+  // NTC testi icin timeout kontrolu
   if (currentMenu == MENU_NTC && ntcTestRunning && ntcTestStartTime > 0) {
     if (now - ntcTestStartTime > NTC_TEST_TIMEOUT_MS) {
       ntcTestRunning = false;
       ntcHasResult   = true;
-
       if (ntcSampleCount > 0) {
         ntcAverageTemp = ntcSampleSum / ntcSampleCount;
         ntcStatusSuccess = (ntcAverageTemp >= 0.0f && ntcAverageTemp <= 100.0f);
@@ -2065,8 +2481,23 @@ void loop() {
         ntcAverageTemp   = 0.0f;
         ntcStatusSuccess = false;
       }
-
       drawNTCScreen();
+    }
+  }
+
+  // IR Temp testi icin timeout kontrolu (NTC ile ayni)
+  if (currentMenu == MENU_IR_TEMP && irTestRunning && irTestStartTime > 0) {
+    if (now - irTestStartTime > IR_TEST_TIMEOUT_MS) {
+      irTestRunning = false;
+      irHasResult   = true;
+      if (irSampleCount > 0) {
+        irAverageTemp = irSampleSum / irSampleCount;
+        irStatusSuccess = (irAverageTemp >= 0.0f && irAverageTemp <= 100.0f);
+      } else {
+        irAverageTemp   = 0.0f;
+        irStatusSuccess = false;
+      }
+      drawIRTempScreen();
     }
   }
   

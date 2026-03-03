@@ -125,6 +125,163 @@ Ana menüde 6 satır görünür, seçim kaydırmalıdır.
 
 ---
 
+## Sensör ve Test Menülerinin Detaylı Çalışması
+
+Bu bölümde son eklenen NTC/IR, fan, gesture, projeksiyon ve status kontrollerinin akışları özetlenir.
+
+### NTC Test Menüsü
+
+- **Status kaynağı:** `$X` komutundan gelen `ntc_sensor_status` (0 = OK, 1 = HATA / bağlı değil).
+- **Menüye girince:**
+  - Bir kez `$X` çağrılır, `ntcSensorStatus` ve `ntcSensorDisconnected` güncellenir.
+  - Status 1 ise ekranda **Durum: FAIL**, ölçüm yapılmaz.
+- **“Test için tıkla”:**
+  - Önce sensör status cache’i kullanılır; yoksa bir kez daha `$X` ile kontrol edilir.
+  - Status 0 ise:
+    - 100 örnek alınır (her `NTC_SAMPLE_INTERVAL_MS` ms).
+    - Min/Max/Ortalama hesaplanır, adım ve stabilite kontrolü yapılır.
+    - Sıcaklık 0–100 °C ve stabil ise **SUCCESS**, aksi halde **FAIL**.
+  - Status 1 ise anında **FAIL** gösterilir.
+  - Ölçüm sonucu “Deger:” satırında ortalama °C olarak gösterilir.
+
+### IR Temp Menüsü
+
+- **Status kaynağı:** `$X` → `ir_sensor_status`.
+- **Status 1 (sensör bağlı değil / hata):**
+  - Ekranda **Durum: FAIL**.
+  - Değer satırı **0.0 C** gösterir.
+- **Test akışı:**
+  - 20 örnek alınır (NTC ile benzer tolerans ama IR için daha gevşek stabilite limiti).
+  - Aralık ve delta kontrolleri ile SUCCESS/FAIL belirlenir.
+  - Arka arkaya testlerde `$X` çağrıları zamanlanarak `$A` telemetrisi ile çakışma engellenir.
+
+### Intake ve Exhaust Fan Menüleri
+
+#### `$X` Status Alanları
+
+`$X` cevabı (en son haliyle):
+
+```text
+$ntc_sensor_status,
+ ir_sensor_status,
+ exthaust_fan.getSpinningError(),
+ intake1_fan.getSpinningError(),
+ intake2_fan.getSpinningError(),
+ gesture_sensor_status,
+ projector_sensor_status,
+ force_sensor_status
+```
+
+- Fan hata bitleri (`getSpinningError()` dönen 0/1) her **`SENSOR_STATUS_REFRESH_MS`** ms’de bir okunur.
+
+#### Intake Fan Ekranı
+
+- Gösterilenler:
+  - `F1` ve `F2` RPM (STM32’den `$A` ile gelen /10 değerleri).
+  - Hata sütunu: ilgili fan için status 1 veya RPM eşiği altındaysa **“HATA”** yazılır.
+- **RPM eşiği:**
+  - `%100` güçte (`fanSpeedPercent == 100`) iken:
+    - `intakeX_fan_raw <= 2500.0` RPM ise hata kabul edilir.
+- **Otomatik durdurma:**
+  - Intake menüsündeyken periyodik `$X` ile:
+    - F1 veya F2 için hata algılanırsa ve `fanSpeedPercent != 0` ise:
+      - `fanSpeedPercent = 0;`
+      - `sendIntakeFanCommand();` ile her iki intake fan durdurulur.
+- **Kullanıcı girişleri:**
+  - Encoder döndürme: hız %0–100 arası %10 adımlar; her adımda komut gönderilir.
+  - Her adım sonrası `delay(100)` ile küçük debounce uygulanır.
+
+#### Exhaust Fan Ekranı
+
+- Gösterilenler:
+  - Hız yüzdesi ve RPM.
+  - Altta hata satırı: `$X`’teki `exhaust_fan_error == 1` veya
+    - `%100` güçteyken `exhaust_fan_raw <= 2500.0` RPM ise **“HATA VAR”**.
+- **Otomatik durdurma:**
+  - Hata algılanırsa ve hız %0’dan büyükse:
+    - `exhaustFanSpeedPercent = 0;`
+    - `sendExhaustFanCommand();` ile exhaust fan durdurulur.
+- Encoder davranışı intake ile aynıdır (%10 adımlar + 100 ms debounce).
+
+### Gesture Sensor Menüsü
+
+Gesture sensör dijital ve konfigürasyon gerektirdiği için iki adımlı çalışır:
+
+1. **Menüye girince (config aşaması):**
+   - `currentMenu = MENU_GESTURE;`
+   - `gestureHasResult = false;`, `gestureStatusSuccess = false;`, `last_gesture_type = NONE`.
+   - **`$I\r\n`** gönderilir (sensörü initialize etmek için).
+   - Kısa `delay(40)` sonrası ekran çizilir, **Durum: BEKLEME** görünür.
+
+2. **Alt menü ve test:**
+   - Alt menü:
+     - `> Test icin tikla`
+     - `  Cikis`
+   - Encoder ile bu iki satır arasında gezilir.
+   - **“Test icin tikla” seçiliyken butona basılınca:**
+     - Yeniden `$I` gönderilir (sensör sökülüp takılmış olabilir).
+     - Kısa bekleme sonrası `$X` çağrılır.
+     - `$X`’ten gelen `gesture_sensor_status`:
+       - 0 → `gestureStatusSuccess = true` → **Durum: SUCCESS**
+       - 1 veya timeout → `gestureStatusSuccess = false` → **Durum: FAIL**
+   - **“Cikis” seçiliyken butona basılınca:** Ana menüye dönülür.
+
+3. **Gesture yönü gösterimi:**
+   - Gesture yönü `$A` telemetrisindeki 8. alan (`gesture_type = 0..4`) ile okunur.
+   - `NONE` dışındaki son geçerli değer `last_gesture_type` olarak saklanır.
+   - Ekranda büyük fontla **SON hareket** (UP/DOWN/LEFT/RIGHT) gösterilir ve yeni gesture gelene kadar sabit kalır.
+
+### Projeksiyon (LED) Test Menüsü
+
+Projeksiyon menüsü hem bağlantı testi, hem LED aç/kapa, hem de akım ayarı için tek ekrandan kontrol sağlar.
+
+#### Başlangıç Akışı (Menüye Girince)
+
+`Projection` menüsüne girildiğinde otomatik olarak:
+
+1. `projeksiyonLedOn = false; projeksiyonAkim = 512;`
+2. **`$PF\r\n`** gönderilir → projektör kapatılır.
+3. `500 ms` beklenir.
+4. **`$I\r\n`** komutu gönderilir (projektör ve ilgili sensörleri konfigüre eder).
+5. Kısa bekleme sonrası **`$X`** çağrılır:
+   - `$X`’in `projector_sensor_status` alanı:
+     - 0 ise: `projectorStatusSuccess = true` → **Durum: SUCCESS**
+     - 1 ise: `projectorStatusSuccess = false` → **Durum: FAIL**
+
+#### Alt Menü ve Kontroller
+
+Projeksiyon ekranında şu satırlar bulunur:
+
+- `> LED : ACIK/KAPALI`  
+- `  Akim: <deger> [* edit modunda]`  
+- `  Test icin tikla`  
+- `  Cikis`
+
+**Encoder:**
+
+- Eğer **Akim** satırı seçili ve edit modu açık ise:
+  - Encoder çevirme → `projeksiyonAkim` ±10 (91–1023 arası), her değişimde `$PC<deger>` komutu (`sendProjeksiyonCurrent`) gönderilir.
+- Diğer durumda:
+  - Encoder çevirme → `projectorSelection` 0–3 arasında döner (LED / Akim / Test / Cikis seçimleri).
+
+**Buton:**
+
+- **LED satırında (0) iken:**
+  - Eğer son test sonucu **SUCCESS** ise (`projectorStatusSuccess == true`):
+    - `projeksiyonLedOn` terslenir.
+    - Yeni duruma göre `$P1` (ON) veya `$P0` (OFF) komutu gönderilir.
+- **Akim satırında (1) iken:**
+  - Buton, `projectorEditMode` durumunu aç/kapatır (satır sonunda `*` ile gösterilir).
+- **Test satırında (2) iken:**
+  - `$PF` → 500 ms → `$I` → kısa bekleme → `$X` sırası tekrar çalıştırılır.
+  - `projector_sensor_status == 0` ise SUCCESS, aksi halde FAIL.
+- **Cikis satırında (3) iken:**
+  - Ana menüye dönülür.
+
+> Not: `force_sensor_status` şu an sadece seri log’da gösterilir; ileride ayrı bir test ekranı için ayrılmıştır.
+
+---
+
 ## Proje Yapısı ve Dokümantasyon
 
 ```
