@@ -134,6 +134,39 @@ if (now - lastRead >= readInterval) {
 - Veri parse edildikten hemen sonra, ilgili ekrandaysa ekran anında güncellenir (loop beklemeden)
 - Gesture ve TMC Ref ekranları için özel optimizasyon yapılmıştır
 
+### 2.5. Status Sorgusu ($X)
+
+ESP32'den STM32'ye gönderilen komut:
+
+```
+$X\r\n
+```
+
+**Amaç:** NTC, IR, fan hataları, gesture, projeksiyon ve force sensör durumlarını tek seferde almak.
+
+**STM32 cevap formatı (8 alan):**
+
+```
+$ntc_sensor_status,ir_sensor_status,exhaust_fan_err,intake1_fan_err,intake2_fan_err,gesture_sensor_status,projector_sensor_status,force_sensor_status\r\n
+```
+
+**Alanlar (hepsi 0 = OK, 1 = HATA):**
+
+| Sıra | Alan | Açıklama |
+|------|------|----------|
+| 0 | ntc_sensor_status | NTC sensör durumu (0=OK, 1=HATA/bağlı değil) |
+| 1 | ir_sensor_status | IR sensör durumu (0=OK, 1=HATA/bağlı değil) |
+| 2 | exhaust_fan_err | Exhaust fan dönme hatası (0=OK, 1=HATA) |
+| 3 | intake1_fan_err | Intake fan 1 dönme hatası (0=OK, 1=HATA) |
+| 4 | intake2_fan_err | Intake fan 2 dönme hatası (0=OK, 1=HATA) |
+| 5 | gesture_sensor_status | Gesture sensör durumu (0=OK, 1=HATA) |
+| 6 | projector_sensor_status | Projeksiyon sensör durumu (0=OK, 1=HATA) |
+| 7 | force_sensor_status | Force sensör durumu (0=OK, 1=HATA; loadcell testinde 1 ise HATA) |
+
+**Örnek:** `$0,1,0,0,0,0,0,1\r\n` → NTC OK, IR HATA, fanlar OK, gesture OK, projeksiyon OK, force HATA.
+
+**Kullanım:** NTC/IR test menüleri, gesture/projeksiyon testi, loadcell testi (force_sensor_status) ve fan ekranlarında periyodik hata kontrolü için kullanılır.
+
 ---
 
 ## 3. Fan Kontrol Komutları
@@ -455,6 +488,61 @@ Serial1.flush();
 - Z/Y motor menülerinde, hareket komutu gönderilmeden önce motor enable edilmemişse otomatik olarak enable komutu gönderilir ve STM32'nin enable'i işlemesi için kısa bir gecikme uygulanır (yaklaşık **100 ms**).
 - CVR motorlarında enable ardından ekstra gecikme kullanılmaz; STM32 tarafındaki uygulamaya göre ihtiyaç olursa eklenebilir.
 
+### 3.8. Loadcell Komutları
+
+Loadcell testi için kullanılan komutlar. Sıra önemlidir: önce konfigürasyon (`$I`), sonra status kontrolü (`$X`), ardından tare (`$WT`) ve tek tek loadcell okuma (`$Wn`).
+
+#### 3.8.1. Konfigürasyon ve Status
+
+**Konfigürasyon (gesture/projeksiyon + loadcell ortamı):**
+```text
+$I\r\n
+```
+- Loadcell testine girmeden önce gönderilir; ardından en az **500 ms** beklenir.
+- Ayrıntı için Gesture/Projeksiyon bölümlerine bakın.
+
+**Status kontrolü:**
+```text
+$X\r\n
+```
+- Cevap: `$...,force_sensor_status` (8. alan). `force_sensor_status == 1` ise loadcell testi HATA kabul edilir, ekrana hata yazılır ve test yapılmaz.
+- Format detayı için **2.5. Status Sorgusu ($X)** bölümüne bakın.
+
+#### 3.8.2. Tare Komutu
+
+```text
+$WT\r\n
+```
+
+**Açıklama:** Tüm loadcell’leri sıfırlar (tare). ESP32, butona basar basmaz ekranda "TARE..." gösterir, `$I` → 500 ms → `$X` yapar; hata yoksa `$WT` gönderir ve değerler 0 g civarında stabil olana kadar (veya max ~8 saniye) bekler, sonra ekrana 4 loadcell değerini yazar.
+
+#### 3.8.3. Loadcell Değeri Okuma
+
+```text
+$Wn\r\n
+```
+
+**Alanlar:**
+- `n` = 1, 2, 3 veya 4 (loadcell numarası).
+
+**STM32 cevabı:** `$<deger>\r\n` — tek bir ondalıklı sayı (gram). Örnek: `$-152.28`, `$0.00`.
+
+**Kod örneği:**
+```cpp
+Serial1.print("$W");
+Serial1.print(n);  // 1..4
+Serial1.print("\r\n");
+Serial1.flush();
+// Cevap: $<float>\r\n, timeout READ_TIMEOUT_MS
+```
+
+**Loadcell test akışı (özet):**
+1. Butona basılır → ekranda hemen "TARE..." çizilir.
+2. `$I\r\n` gönderilir, 500 ms beklenir.
+3. `$X\r\n` gönderilir; cevapta `force_sensor_status == 1` ise HATA ekranı çizilir, çıkılır.
+4. `$WT\r\n` gönderilir; 4 loadcell değeri 0 g civarında stabil olana kadar (ör. 3 ardışık okuma ±0.5 g) veya max süreye kadar tekrar `$W1`..`$W4` ile okunur.
+5. Tare bittikten sonra son değerler ekrana yazılır (Loadcell sonuç ekranı).
+
 ---
 
 ## 4. Veri Değişkenleri
@@ -525,6 +613,10 @@ bool brakeMotorActive = false;     // false: pasif ($B0), true: aktif ($B1)
 | Komut | Açıklama | Gönderen | Alıcı | Format |
 |-------|----------|----------|-------|--------|
 | `$A\r\n` | Sensör verilerini iste | ESP32 | STM32 | `$A\r\n` |
+| `$X\r\n` | Status iste (NTC, IR, fan, gesture, projeksiyon, force) | ESP32 | STM32 | Cevap: `$v0,v1,...,v7\r\n` (8 alan) |
+| `$I\r\n` | Konfigürasyon (gesture/projeksiyon/loadcell ortamı) | ESP32 | STM32 | `$I\r\n` |
+| `$WT\r\n` | Loadcell tare (sıfırlama) | ESP32 | STM32 | `$WT\r\n` |
+| `$Wn\r\n` | n. loadcell değerini oku (gram) | ESP32 | STM32 | n=1..4, cevap: `$<float>\r\n` |
 | `$F1HHHH\r\n` | Intake Fan 1 hızını ayarla | ESP32 | STM32 | `$F1` + hız (0-1999) + `\r\n` |
 | `$F2HHHH\r\n` | Intake Fan 2 hızını ayarla | ESP32 | STM32 | `$F2` + hız (0-1999) + `\r\n` |
 | `$F3HHHH\r\n` | Exhaust Fan hızını ayarla | ESP32 | STM32 | `$F3` + hız (0-1999) + `\r\n` |
@@ -673,7 +765,19 @@ ESP32                    STM32
    - CVR2 Ref ekranında: cvr2_tmc_status_stop_r = 1, cvr2_tmc_status_stop_l = 0
 ```
 
-### Senaryo 6: Fren Motoru Kontrolü
+### Senaryo 6: Loadcell Testi (TARE + 4 Okuma)
+```
+1. Kullanıcı Loadcell menüsünde "Test Et" seçiliyken butona basar.
+2. ESP32 hemen ekranda "TARE..." gösterir.
+3. $I\r\n gönderilir, 500 ms beklenir.
+4. $X\r\n gönderilir; force_sensor_status == 1 ise HATA ekranı çizilir ve çıkılır.
+5. $WT\r\n gönderilir (tare).
+6. Döngüde $W1..$W4 ile 4 loadcell okunur; hepsi ±0.5 g içinde 3 ardışık okumada stabil olana
+   veya max LOADCELL_TARE_WAIT_MS (8 saniye) dolana kadar tekrarlanır.
+7. Tare bitince son değerler ekrana yazılır (Loadcell sonuç ekranı).
+```
+
+### Senaryo 7: Fren Motoru Kontrolü
 ```
 1. Kullanıcı BRAKE MOTOR menüsüne girer
 2. Encoder sağa döndürülünce:
@@ -780,6 +884,7 @@ Brake Motor: $B0  (Pasif)
 13. **Y Motor** - Y step motorunu mikrostep ile kontrol eder (enable/disable/stop/hareket)
 14. **CVR Motor** - CVR-1 / CVR-2 step motorlarını mikrostep ile kontrol eder (motor seçimi + enable/disable/stop/hareket)
 15. **Projeksiyon** - Projeksiyon LED aç/kapa ve akım ayarı (91–1023)
+16. **Loadcell** - 4 loadcell tare + okuma testi (Test Et / Çıkış; butona basar basmaz TARE ekranda, tare bitince değerler yazılır)
 
 ### 11.2. TMC Ref Ekranları
 - **Durum Gösterimi:** Merkezde büyük fontla "BASILI" veya "BASILI DEGIL"
@@ -836,11 +941,15 @@ Brake Motor: $B0  (Pasif)
 
 ## 12. Versiyon Bilgisi
 
-- **Protokol Versiyonu:** 2.2
-- **Son Güncelleme:** 2026-01-30
+- **Protokol Versiyonu:** 2.3
+- **Son Güncelleme:** 2026-03-06
 - **ESP32 Kart:** Adafruit HUZZAH32 Feather
 - **STM32:** (Kart modeli belirtilmeli)
-- **Yeni Özellikler (v2.2):**
+- **Yeni Özellikler (v2.3):**
+  - Status sorgusu ($X) dokümante edildi: 8 alan (NTC, IR, fan hataları, gesture, projeksiyon, force)
+  - Loadcell komutları: $I, $X, $WT (tare), $Wn (n=1..4, gram okuma)
+  - Loadcell test akışı: butona basar basmaz "TARE..." gösterimi, $I → 500 ms → $X → $WT → stabil okuma → ekrana yazdırma
+- **Önceki Özellikler (v2.2):**
   - Z / Y / CVR step motor komutları ($SZE/$SZD/$SZP, $SZD,MMM,SSS; $SYE/$SYD/$SYP, $SYD,MMM,SSS; $S1E/$S1D/$S1P, $S2E/$S2D/$S2P, $SND,MMM,SSS)
   - Projeksiyon (LED) komutları ve menüsü ($P1/$P0/$PCVVV, alt limit 91)
   - Menü dokümantasyonuna Z/Y/CVR Motor ve Projeksiyon ekranlarının eklenmesi

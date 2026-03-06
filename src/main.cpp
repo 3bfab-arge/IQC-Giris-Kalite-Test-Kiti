@@ -24,6 +24,8 @@
 #define READ_TIMEOUT_MS    150  // Cevap gelmezse en fazla bu kadar ms bekle (timeout)
 #define LOOP_DELAY_MS      5    // Her loop sonu bekleme (ms)
 #define BUTTON_DEBOUNCE_MS 450  // Buton basimlari arasi min sure (ms)
+// Z ekseni icin 1 tur mikrostep sayisi (STM32 Z mapping farkli oldugu icin ayrica kalibre edilir)
+#define Z_MOTOR_TURN_STEPS 2000
 #define SENSOR_STATUS_REFRESH_MS 100   // NTC/IR baglanti durumunu periyodik yenileme (ms)
 #define GESTURE_LOOP_DELAY_MS 2 // Gesture ekranindayken daha hizli dongu
 #define SCREEN_UPDATE_MS   50   // OLED yenileme araligi (ms)
@@ -37,9 +39,12 @@
 // IR Temp test ozel parametreleri (NTC ile ayni mantik)
 #define IR_SAMPLE_COUNT         20   // IR testi icin alinacak olcum sayisi
 #define IR_SAMPLE_INTERVAL_MS   110  // IR testi sirasinda olcumler arasi bekleme (ms) - timing stabilitesi
-#define IR_TEST_TIMEOUT_MS     5000 // IR testi max sure (ms), asilirsa FAIL
-#define IR_STABILITY_DELTA_C    4.0f // IR testi icin max sapma (IR gurultulu olabilir, NTC'den gevsek)
-#define IR_STEP_DELTA_C         1.0f // Iki ardil olcum arasi max fark (C)
+#define IR_TEST_TIMEOUT_MS       5000  // IR testi max sure (ms), asilirsa FAIL
+#define IR_STABILITY_DELTA_C       4.0f // IR testi icin max sapma (IR gurultulu olabilir, NTC'den gevsek)
+#define IR_STEP_DELTA_C            1.0f // Iki ardil olcum arasi max fark (C)
+#define LOADCELL_UPDATE_MS         500  // Loadcell sonuc ekraninda yenileme araligi (ms)
+#define LOADCELL_TARE_WAIT_MS    8000  // TARE komutunun bitmesini beklemede max sure (ms)
+#define LOADCELL_TARE_EPSILON_G    0.5f // TARE sonrasi "0" kabul edilecek mutlak deger esigi (g)
 
 // OLED Ekran - 128x64, I2C
 #define SCREEN_WIDTH 128
@@ -115,11 +120,12 @@ enum MenuState {
   MENU_Z_MOTOR,
   MENU_Y_MOTOR,
   MENU_CVR_MOTOR,
+  MENU_LOADCELL,
   MENU_PROJEKSIYON
 };
 
 MenuState currentMenu = MENU_MAIN;
-int menuSelection = 0; // 0-14 arasi menü seçimi
+int menuSelection = 0; // menü seçimi
 const char* menuItems[] = {
   "IR Temp. Sensor",
   "NTC",
@@ -131,13 +137,14 @@ const char* menuItems[] = {
   "Y Ref.",
   "CVR1 Ref.",
   "CVR2 Ref.",
-  "Brake Motor",
+  "Motor Freni",
   "Z Motor",
   "Y Motor",
   "CVR 1-2 Motor",
+  "Loadcell",
   "Projection"
 };
-const int menuItemCount = 15;
+const int menuItemCount = 16;
 bool screenNeedsUpdate = true;
 
 // Intake Fan ayarlama degiskenleri
@@ -156,14 +163,16 @@ int rgbSelectedParam = 0; // 0: Hue, 1: Saturation, 2: Value
 int rgbParamSelection = 0; // 0: Hue, 1: Saturation, 2: Value, 3: Cikis
 bool rgbMode = false; // false: parametre secimi, true: deger ayarlama
 bool rgbCommandSent = false; // Komut gonderildi mi?
+int  rgbMenuSelection = 0;   // RGB menusu: 0 = LED Test, 1 = Cikis
 
-// Brake Motor ayarlama degiskenleri
+// Motor freni (Brake Motor) ayarlama degiskenleri
 bool brakeMotorActive = false; // false: pasif ($B0), true: aktif ($B1)
+int  brakeMotorSelection = 0;  // 0: Test icin tikla, 1: Cikis
 
 // Z Motor ayarlama degiskenleri (mikrostep tabanli)
 bool zMotorEnabled = false;        // $SZE / $SZD
 int  zMotorDir = 1;                // 0: geri, 1: ileri
-long zMotorDistanceSteps = 1600;   // mikrostep cinsinden mesafe (örn. 1 tur = 1600)
+long zMotorDistanceSteps = Z_MOTOR_TURN_STEPS;   // mikrostep cinsinden mesafe (1 tur - Z icin ayrica kalibre)
 long zMotorSpeedStepsPerS = 1600;  // mikrostep/s cinsinden hiz (örn. 1 tur/s)
 int  zMotorParamSelection = 0;     // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
 bool zMotorEditMode = false;       // false: satir secimi, true: deger ayarlama (Yon/Mesafe/Hiz)
@@ -233,9 +242,21 @@ bool  gestureHasResult     = false;  // test yapildi mi
 bool  gestureStatusSuccess = false;  // true: SUCCESS, false: FAIL
 int   gestureSelection     = 0;      // 0: Test, 1: Cikis
 
+// Z / Y / CVR motor test menuleri icin secim degiskenleri
+int   zMotorTestSelection   = 0;      // 0: Test, 1: Cikis
+int   yMotorTestSelection   = 0;      // 0: Test, 1: Cikis
+int   cvrMotorTestSelection = 0;      // 0: Test, 1: Cikis
+
+// Loadcell menusu icin secim / ekran durumu
+int   loadcellSelection     = 0;      // 0: Test Et, 1: Cikis (sadece menu modunda)
+int   loadcellScreenMode    = 0;      // 0: menu, 1: Test sonucu (4 deger), 2: HATA ekrani
+float loadcell1_g = 0.0f, loadcell2_g = 0.0f, loadcell3_g = 0.0f, loadcell4_g = 0.0f;  // gram
+
+
 static unsigned long lastRead = 0;
 static unsigned long lastButtonPress = 0;
 static unsigned long lastSensorStatusCheck = 0;
+static unsigned long lastLoadcellUpdate = 0;
 
 // Forward declaration
 void readSTM32Data();
@@ -255,11 +276,16 @@ void drawBrakeMotorScreen();
 void drawZMotorScreen();
 void drawYMotorScreen();
 void drawCVRMotorScreen();
+void drawLoadcellScreen();
 void drawProjeksiyonScreen();
 void sendBrakeMotorCommand(bool active);
 void sendProjeksiyonOn();
 void sendProjeksiyonOff();
 void sendProjeksiyonCurrent();
+void runRGBLedTest();
+void runZMotorTest();
+void runYMotorTest();
+void runLoadcellTest();
 void sendZMotorEnable(bool enable);
 void sendZMotorStop();
 void sendZMotorMove();
@@ -840,104 +866,138 @@ void drawGestureScreen() {
 
 void drawZRefScreen() {
   display.clearDisplay();
-  drawHeader("Z Reference");
-  
-  // Durum merkezde büyük fontla
-  const char* statusText = (z_tmc_status_stop_r == 1) ? "BASILI" : "PASIF";
-  drawCenteredText(28, statusText, 2);
-  
-  // Alt bilgi
-  display.setTextSize(1);
-  display.setCursor(0, 52);
-  display.print("Status: ");
-  display.print(z_tmc_status_stop_r);
-  display.print(" (");
-  display.print(statusText);
-  display.print(")");
-  
+  drawHeader("Z Optik Limit");
+
+  // Yalnizca 0 / 1 degerini buyuk ve ortali goster
+  display.setTextSize(3);
+  char buf[4];
+  snprintf(buf, sizeof(buf), "%d", z_tmc_status_stop_r);
+  // 32 satirini kullanarak hem dikey hem yatay ortalama
+  drawCenteredText(32, buf, 3);
+
   display.display();
 }
 
 void drawYRefScreen() {
   display.clearDisplay();
-  drawHeader("Y Reference");
-  
-  // Right durumu merkezde büyük fontla
-  const char* rightStatus = (y_tmc_status_stop_r == 1) ? "R: BASILI" : "R: PASIF";
+  drawHeader("Y Optik Limit");
+
   display.setTextSize(2);
-  display.setCursor(0, 20);
-  display.print(rightStatus);
-  
-  // Left durumu altta
-  display.setTextSize(1);
-  display.setCursor(0, 44);
-  display.print("Left: ");
-  display.print(y_tmc_status_stop_l == 1 ? "BASILI" : "PASIF");
-  display.print(" (");
-  display.print(y_tmc_status_stop_l);
-  display.print(")");
-  
+  char lineBuf[16];
+
+  // Right satiri
+  snprintf(lineBuf, sizeof(lineBuf), "Right: %d", y_tmc_status_stop_r);
+  drawCenteredText(22, lineBuf, 2);
+
+  // Left satiri
+  snprintf(lineBuf, sizeof(lineBuf), "Left : %d", y_tmc_status_stop_l);
+  drawCenteredText(42, lineBuf, 2);
+
   display.display();
 }
 
 void drawCVR1RefScreen() {
   display.clearDisplay();
-  drawHeader("CVR1 Reference");
-  
-  // Right durumu merkezde büyük fontla
-  const char* rightStatus = (cvr1_tmc_status_stop_r == 1) ? "R: BASILI" : "R: PASIF";
+  drawHeader("CVR1 Optik Limit");
+
   display.setTextSize(2);
-  display.setCursor(0, 20);
-  display.print(rightStatus);
-  
-  // Left durumu altta
-  display.setTextSize(1);
-  display.setCursor(0, 44);
-  display.print("Left: ");
-  display.print(cvr1_tmc_status_stop_l == 1 ? "BASILI" : "PASIF");
-  display.print(" (");
-  display.print(cvr1_tmc_status_stop_l);
-  display.print(")");
-  
+  char lineBuf[16];
+
+  // Up satiri (cvr1_tmc_status_stop_l)
+  snprintf(lineBuf, sizeof(lineBuf), "Up   : %d", cvr1_tmc_status_stop_l);
+  drawCenteredText(22, lineBuf, 2);
+
+  // Down satiri (cvr1_tmc_status_stop_r)
+  snprintf(lineBuf, sizeof(lineBuf), "Down : %d", cvr1_tmc_status_stop_r);
+  drawCenteredText(42, lineBuf, 2);
+
   display.display();
 }
 
 void drawCVR2RefScreen() {
   display.clearDisplay();
-  drawHeader("CVR2 Reference");
-  
-  // Right durumu merkezde büyük fontla
-  const char* rightStatus = (cvr2_tmc_status_stop_r == 1) ? "R: BASILI" : "R: PASIF";
+  drawHeader("CVR2 Optik Limit");
+
   display.setTextSize(2);
-  display.setCursor(0, 20);
-  display.print(rightStatus);
-  
-  // Left durumu altta
-  display.setTextSize(1);
-  display.setCursor(0, 44);
-  display.print("Left: ");
-  display.print(cvr2_tmc_status_stop_l == 1 ? "BASILI" : "PASIF");
-  display.print(" (");
-  display.print(cvr2_tmc_status_stop_l);
-  display.print(")");
-  
+  char lineBuf[16];
+
+  // Up satiri (cvr2_tmc_status_stop_l)
+  snprintf(lineBuf, sizeof(lineBuf), "Up   : %d", cvr2_tmc_status_stop_l);
+  drawCenteredText(22, lineBuf, 2);
+
+  // Down satiri (cvr2_tmc_status_stop_r)
+  snprintf(lineBuf, sizeof(lineBuf), "Down : %d", cvr2_tmc_status_stop_r);
+  drawCenteredText(42, lineBuf, 2);
+
+  display.display();
+}
+
+// Loadcell menusu: Test Et / Cikis
+void drawLoadcellScreen() {
+  display.clearDisplay();
+  if (loadcellScreenMode == 0) {
+    // Normal menu modu: Test Et / Cikis
+    drawHeader("Loadcell");
+
+    display.setTextSize(1);
+    int y1 = 26;
+    display.setCursor(0, y1);
+    display.print(loadcellSelection == 0 ? ">" : " ");
+    display.print(" Test Et");
+
+    int y2 = 38;
+    display.setCursor(0, y2);
+    display.print(loadcellSelection == 1 ? ">" : " ");
+    display.print(" Cikis");
+  } else if (loadcellScreenMode == 1) {
+    // Test sonucu: 4 loadcell degeri (gram)
+    drawHeader("Loadcell Test");
+    display.setTextSize(1);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "L1: %.2f g", loadcell1_g);
+    display.setCursor(0, 18);
+    display.print(buf);
+    snprintf(buf, sizeof(buf), "L2: %.2f g", loadcell2_g);
+    display.setCursor(0, 28);
+    display.print(buf);
+    snprintf(buf, sizeof(buf), "L3: %.2f g", loadcell3_g);
+    display.setCursor(0, 38);
+    display.print(buf);
+    snprintf(buf, sizeof(buf), "L4: %.2f g", loadcell4_g);
+    display.setCursor(0, 48);
+    display.print(buf);
+  } else if (loadcellScreenMode == 2) {
+    // HATA ekrani (force_sensor_status == 1 veya $X hatasi)
+    drawHeader("Loadcell");
+    display.setTextSize(2);
+    // HATA yazisini ekranda ortala
+    drawCenteredText(32, "HATA", 2);
+  }
+
   display.display();
 }
 
 void drawBrakeMotorScreen() {
   display.clearDisplay();
-  drawHeader("BRAKE MOTOR");
-  
-  // Durum merkezde büyük fontla
-  const char* statusText = brakeMotorActive ? "AKTIF" : "PASIF";
-  drawCenteredText(28, statusText, 2);
-  
-  // Alt bilgi
+  drawHeader("Motor Freni");
+
+  // Durum satiri
   display.setTextSize(1);
-  display.setCursor(0, 48);
-  display.print("Komut: $B");
-  display.print(brakeMotorActive ? "1" : "0");
-  
+  display.setCursor(0, 16);
+  display.print("Durum: ");
+  display.print(brakeMotorActive ? "AKTIF" : "PASIF");
+
+  // Alt menü: Test / Cikis
+  int y1 = 32;
+  display.setCursor(0, y1);
+  display.print(brakeMotorSelection == 0 ? ">" : " ");
+  display.print(" Test icin tikla");
+
+  int y2 = 42;
+  display.setCursor(0, y2);
+  display.print(brakeMotorSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
+
   display.display();
 }
 
@@ -952,45 +1012,51 @@ void sendBrakeMotorCommand(bool active) {
   Serial.println(active ? "$B1" : "$B0");
 }
 
-// Z Motor ekranı
+// Motor freni testi: 5 kez ac/kapa, ekranda ilerleme 1/5, 2/5 ... goster
+void runBrakeMotorTest() {
+  for (int i = 1; i <= 5; ++i) {
+    // Ekranda ilerlemeyi goster
+    display.clearDisplay();
+    drawHeader("Motor Freni");
+    display.setTextSize(2);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d/5", i);
+    drawCenteredText(28, buf, 2);
+    display.display();
+
+    // Motor frenini AC
+    brakeMotorActive = true;
+    sendBrakeMotorCommand(true);
+    delay(1000);
+
+    // Motor frenini KAPAT
+    brakeMotorActive = false;
+    sendBrakeMotorCommand(false);
+    delay(1000);
+  }
+
+  // Test bittikten sonra normal ekrana don
+  drawBrakeMotorScreen();
+}
+
+// Z Motor test ekrani: Test / Cikis
 void drawZMotorScreen() {
   display.clearDisplay();
-  drawHeader("Z Motor");
+  drawHeader("Z Motor Test");
 
-  // Satirlar:
-  // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
-  int y = 16;
-  for (int row = 0; row < 6; row++) {
-    display.setCursor(0, y);
-    if (row == zMotorParamSelection) {
-      display.print(zMotorEditMode ? "*" : ">");
-    } else {
-      display.print(" ");
-    }
-    display.print(" ");
+  display.setTextSize(1);
+  display.setCursor(0, 16);
+  display.print("1 tur sol/sag, 3 hiz");
 
-    if (row == 0) {
-      display.print("Durum: ");
-      display.print(zMotorEnabled ? "AKTIF" : "PASIF");
-    } else if (row == 1) {
-      display.print("Yon  : ");
-      display.print(zMotorDir == 1 ? "ILERI" : "GERI");
-    } else if (row == 2) {
-      display.print("Mesafe: ");
-      display.print(zMotorDistanceSteps);
-      display.print(" ustep");
-    } else if (row == 3) {
-      display.print("Hiz  : ");
-      display.print(zMotorSpeedStepsPerS);
-      display.print(" ustep/s");
-    } else if (row == 4) {
-      display.print("Hareket: Z komutu");
-    } else if (row == 5) {
-      display.print("Geri");
-    }
+  int y1 = 32;
+  display.setCursor(0, y1);
+  display.print(zMotorTestSelection == 0 ? ">" : " ");
+  display.print(" Test icin tikla");
 
-    y += 9;
-  }
+  int y2 = 42;
+  display.setCursor(0, y2);
+  display.print(zMotorTestSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
 
   display.display();
 }
@@ -1031,45 +1097,24 @@ void sendZMotorMove() {
   Serial.println("\\r\\n");
 }
 
-// Y Motor ekranı (mikrostep tabanlı)
+// Y Motor test ekrani: Test / Cikis
 void drawYMotorScreen() {
   display.clearDisplay();
-  drawHeader("Y Motor");
+  drawHeader("Y Motor Test");
 
-  // Satirlar:
-  // 0: Durum, 1: Yon, 2: Mesafe, 3: Hiz, 4: Hareket, 5: Geri
-  int y = 16;
-  for (int row = 0; row < 6; row++) {
-    display.setCursor(0, y);
-    if (row == yMotorParamSelection) {
-      display.print(yMotorEditMode ? "*" : ">");
-    } else {
-      display.print(" ");
-    }
-    display.print(" ");
+  display.setTextSize(1);
+  display.setCursor(0, 16);
+  display.print("1 tur sol/sag, 3 hiz");
 
-    if (row == 0) {
-      display.print("Durum: ");
-      display.print(yMotorEnabled ? "AKTIF" : "PASIF");
-    } else if (row == 1) {
-      display.print("Yon  : ");
-      display.print(yMotorDir == 1 ? "ILERI" : "GERI");
-    } else if (row == 2) {
-      display.print("Mesafe: ");
-      display.print(yMotorDistanceSteps);
-      display.print(" ustep");
-    } else if (row == 3) {
-      display.print("Hiz  : ");
-      display.print(yMotorSpeedStepsPerS);
-      display.print(" ustep/s");
-    } else if (row == 4) {
-      display.print("Hareket: SY komutu");
-    } else if (row == 5) {
-      display.print("Geri");
-    }
+  int y1 = 32;
+  display.setCursor(0, y1);
+  display.print(yMotorTestSelection == 0 ? ">" : " ");
+  display.print(" Test icin tikla");
 
-    y += 9;
-  }
+  int y2 = 42;
+  display.setCursor(0, y2);
+  display.print(yMotorTestSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
 
   display.display();
 }
@@ -1108,52 +1153,24 @@ void sendYMotorMove() {
   Serial.println("\\r\\n");
 }
 
-// CVR Motor ekranı (mikrostep tabanlı, CVR-1 ve CVR-2)
+// CVR 1-2 Motor test ekrani: Test / Cikis
 void drawCVRMotorScreen() {
   display.clearDisplay();
-  drawHeader("CVR Motor");
+  drawHeader("CVR 1-2 Motor Test");
 
-  int m = cvrMotorSelected; // 1 veya 2
+  display.setTextSize(1);
+  display.setCursor(0, 16);
+  display.print("Iki motor: 0-360-0, 3 hiz");
 
-  // Satirlar:
-  // 0: Motor, 1: Durum, 2: Yon, 3: Mesafe, 4: Hiz, 5: Hareket, 6: Geri
-  int y = 16;
-  for (int row = 0; row < 7; row++) {
-    display.setCursor(0, y);
-    if (row == cvrMotorParamSelection) {
-      display.print(cvrMotorEditMode ? "*" : ">");
-    } else {
-      display.print(" ");
-    }
-    display.print(" ");
+  int y1 = 32;
+  display.setCursor(0, y1);
+  display.print(cvrMotorTestSelection == 0 ? ">" : " ");
+  display.print(" Test icin tikla");
 
-    if (row == 0) {
-      display.print("Motor: CVR-");
-      display.print(cvrMotorSelected);
-    } else if (row == 1) {
-      display.print("Durum: ");
-      display.print(cvrMotorEnabled[m] ? "AKTIF" : "PASIF");
-    } else if (row == 2) {
-      display.print("Yon  : ");
-      display.print(cvrMotorDir[m] == 1 ? "ILERI" : "GERI");
-    } else if (row == 3) {
-      display.print("Mesafe: ");
-      display.print(cvrMotorDistanceSteps[m]);
-      display.print(" ustep");
-    } else if (row == 4) {
-      display.print("Hiz  : ");
-      display.print(cvrMotorSpeedStepsPerS[m]);
-      display.print(" ustep/s");
-    } else if (row == 5) {
-      display.print("Hareket: S");
-      display.print(cvrMotorSelected);
-      display.print(" komutu");
-    } else if (row == 6) {
-      display.print("Geri");
-    }
-
-    y += 9;
-  }
+  int y2 = 42;
+  display.setCursor(0, y2);
+  display.print(cvrMotorTestSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
 
   display.display();
 }
@@ -1368,65 +1385,18 @@ void drawExhaustFanScreen() {
 void drawRGBLedScreen() {
   display.clearDisplay();
   drawHeader("RGB LED");
-  
-  if (!rgbMode) {
-    // Parametre secimi modu - daha okunabilir liste
-    const char* params[] = {"Hue", "Saturation", "Value", "Cikis"};
-    int values[] = {rgbHue, rgbSaturation, rgbValue, 0};
-    
-    for (int i = 0; i < 4; i++) {
-      int yPos = 16 + (i * 11);
-      display.setCursor(0, yPos);
-      
-      // Seçili parametre için > işareti
-      if (rgbParamSelection == i) {
-        display.print("> ");
-      } else {
-        display.print("  ");
-      }
-      
-      display.print(params[i]);
-      if (i < 3) {
-        display.print(": ");
-        display.print(values[i]);
-        if (i == 0) display.print(" deg");
-        else display.print("%");
-      }
-    }
-  } else {
-    // Deger ayarlama modu - büyük değer gösterimi
-    const char* paramNames[] = {"Hue", "Saturation", "Value"};
-    int values[] = {rgbHue, rgbSaturation, rgbValue};
-    int maxValues[] = {360, 100, 100};
-    
-    display.setCursor(0, 16);
-    display.print(paramNames[rgbSelectedParam]);
-    display.print(":");
-    
-    // Değer büyük fontla
-    display.setTextSize(2);
-    display.setCursor(0, 28);
-    display.print(values[rgbSelectedParam]);
-    display.setTextSize(1);
-    
-    // Progress bar benzeri gösterim
-    int barWidth = 120;
-    int filled = (barWidth * values[rgbSelectedParam]) / maxValues[rgbSelectedParam];
-    display.setCursor(0, 48);
-    display.print("[");
-    for (int i = 0; i < barWidth / 4; i++) {
-      if (i < filled / 4) display.print("=");
-      else display.print(" ");
-    }
-    display.print("]");
-    
-    // Komut durumu
-    if (rgbCommandSent) {
-      display.setCursor(100, 0);
-      display.print("[OK]");
-    }
-  }
-  
+
+  // Basit RGB test menusu: LED Test / Cikis
+  int y1 = 26;
+  display.setCursor(0, y1);
+  display.print(rgbMenuSelection == 0 ? ">" : " ");
+  display.print(" LED Test");
+
+  int y2 = 38;
+  display.setCursor(0, y2);
+  display.print(rgbMenuSelection == 1 ? ">" : " ");
+  display.print(" Cikis");
+
   display.display();
 }
 
@@ -1452,11 +1422,315 @@ void sendRGBLedCommand() {
   rgbCommandSent = true;
 }
 
+// RGB LED test sekansi: Kirmizi, Yesil, Mavi (2 tur) + Rainbow
+void runRGBLedTest() {
+  // Yardimci lambda: belirli bir rengi yak ve ekranda ortali yaz
+  auto showColor = [](int hue, int sat, int val, const char* label) {
+    rgbHue        = hue;
+    rgbSaturation = sat;
+    rgbValue      = val;
+    sendRGBLedCommand();
+
+    display.clearDisplay();
+    drawHeader("RGB LED TEST");
+    drawCenteredText(32, label, 2);
+    display.display();
+  };
+
+  // 2 tur: KIRMIZI -> YESIL -> MAVI
+  for (int cycle = 0; cycle < 2; ++cycle) {
+    showColor(0,   100, 100, "KIRMIZI");
+    delay(1000);
+    showColor(120, 100, 100, "YESIL");
+    delay(1000);
+    showColor(240, 100, 100, "MAVI");
+    delay(1000);
+  }
+
+  // Rainbow gecisi: 5 saniye boyunca Hue 0-360 arasi don
+  unsigned long start = millis();
+  while (millis() - start < 5000) {
+    unsigned long t = millis() - start;
+    float progress = (float)t / 5000.0f;
+    int hue = (int)(progress * 360.0f);
+    if (hue > 360) hue = 360;
+
+    rgbHue        = hue;
+    rgbSaturation = 100;
+    rgbValue      = 100;
+    sendRGBLedCommand();
+
+    display.clearDisplay();
+    drawHeader("RGB LED TEST");
+    drawCenteredText(32, "RAINBOW", 2);
+    display.display();
+
+    delay(80);
+  }
+
+  // Test sonunda RGB LED'i sondur
+  rgbHue        = 0;
+  rgbSaturation = 0;
+  rgbValue      = 0;
+  sendRGBLedCommand();
+
+  // Test bittikten sonra menü ekranina geri don
+  drawRGBLedScreen();
+}
+
+// Ortak yardimci: verilen parametrelerle Z motoru bir tur dondur
+// NOT: Enable/disable disaridan kontrol edilir; burada sadece move ve bekleme yapilir.
+static void zMotorMoveOneTurn(int dir, int speedStepsPerS) {
+  zMotorDir            = dir;
+  zMotorDistanceSteps  = Z_MOTOR_TURN_STEPS; // 1 tur (Z icin)
+  zMotorSpeedStepsPerS = speedStepsPerS;
+  sendZMotorMove();
+  // Tahmini sure: mesafe / hiz (s) + pay
+  unsigned long moveMs = (unsigned long)(((unsigned long)Z_MOTOR_TURN_STEPS * 1000UL) / (unsigned long)speedStepsPerS) + 300;
+  delay(moveMs);
+}
+
+void runZMotorTest() {
+  display.clearDisplay();
+  drawHeader("Z Motor Test");
+  drawCenteredText(32, "TESTING...", 2);
+  display.display();
+
+  // Test baslangicinda once durdur, sonra enable et
+  sendZMotorStop();
+  delay(100);
+  sendZMotorEnable(true);
+  delay(150);
+
+  // Her fazda: bir tur bir yönde, sonra dur/boşluk, sonra bir tur diger yönde
+
+  // Düsük hiz
+  zMotorMoveOneTurn(1, 400);   // saga 1 tur
+  sendZMotorStop();            // harekete net bir stop
+  delay(800);                  // bosluk
+  zMotorMoveOneTurn(0, 400);   // sola 1 tur
+  sendZMotorStop();
+  delay(1200);
+
+  // Orta hiz
+  zMotorMoveOneTurn(1, 800);
+  sendZMotorStop();
+  delay(800);
+  zMotorMoveOneTurn(0, 800);
+  sendZMotorStop();
+  delay(1200);
+
+  // Yüksek hiz
+  zMotorMoveOneTurn(1, 1600);
+  sendZMotorStop();
+  delay(800);
+  zMotorMoveOneTurn(0, 1600);
+
+  sendZMotorStop();
+
+  // Test bitti: ekrani guncelle
+  drawZMotorScreen();
+}
+
+// Ortak yardimci: verilen parametrelerle Y motoru bir tur dondur
+// NOT: Enable/disable disaridan kontrol edilir; burada sadece move ve bekleme yapilir.
+static void yMotorMoveOneTurn(int dir, int speedStepsPerS) {
+  yMotorDir            = dir;
+  yMotorDistanceSteps  = 1600; // 1 tur
+  yMotorSpeedStepsPerS = speedStepsPerS;
+  sendYMotorMove();
+  unsigned long moveMs = (unsigned long)((1600UL * 1000UL) / (unsigned long)speedStepsPerS) + 300;
+  delay(moveMs);
+}
+
+void runYMotorTest() {
+  display.clearDisplay();
+  drawHeader("Y Motor Test");
+  drawCenteredText(32, "TESTING...", 2);
+  display.display();
+
+  // Test baslangicinda once durdur, sonra enable et
+  sendYMotorStop();
+  delay(100);
+  sendYMotorEnable(true);
+  delay(150);
+
+  // Her fazda: bir tur bir yönde, sonra bir tur diger yönde
+
+  // Düsük hiz
+  yMotorMoveOneTurn(1, 400);   // saga 1 tur
+  delay(1500);
+  yMotorMoveOneTurn(0, 400);   // sola 1 tur
+  delay(2000);
+
+  // Orta hiz
+  yMotorMoveOneTurn(1, 800);
+  delay(1500);
+  yMotorMoveOneTurn(0, 800);
+  delay(2000);
+
+  // Yüksek hiz
+  yMotorMoveOneTurn(1, 1600);
+  delay(1500);
+  yMotorMoveOneTurn(0, 1600);
+
+  sendYMotorStop();
+
+  // Test bitti: ekrani guncelle
+  drawYMotorScreen();
+}
+
+// CVR 1-2 motorlari icin ortak: verilen hizla N tur saga veya sola
+static void cvrMotorsMoveTurnsBoth(int dir, int turns, int speedStepsPerS) {
+  long totalSteps = 1600L * (long)turns;
+  for (int m = 1; m <= 2; ++m) {
+    cvrMotorDir[m]            = dir;
+    cvrMotorDistanceSteps[m]  = totalSteps;
+    cvrMotorSpeedStepsPerS[m] = speedStepsPerS;
+  }
+  // Hareket komutlari ard arda gonderilir (neredeyse eszamanli)
+  sendCVRMotorMove(1);
+  sendCVRMotorMove(2);
+  unsigned long moveMs = (unsigned long)((totalSteps * 1000L) / (long)speedStepsPerS) + 500;
+  delay(moveMs);
+}
+
+void runCVRMotorTest() {
+  display.clearDisplay();
+  drawHeader("CVR 1-2 Motor Test");
+  drawCenteredText(32, "TESTING...", 2);
+  display.display();
+
+  // Baslangicta stop + enable
+  sendCVRMotorStop(1);
+  sendCVRMotorStop(2);
+  delay(100);
+  sendCVRMotorEnable(1, true);
+  sendCVRMotorEnable(2, true);
+  delay(150);
+
+  // HIZLI MOD: 40 tur saga, sonra 40 tur sola (her iki motor birlikte)
+  int fastSpeed = 4000; // biraz daha hizli
+
+  // 40 tur saga
+  cvrMotorsMoveTurnsBoth(1, 40, fastSpeed);
+  sendCVRMotorStop(1);
+  sendCVRMotorStop(2);
+  delay(500);
+
+  // 40 tur sola
+  cvrMotorsMoveTurnsBoth(0, 40, fastSpeed);
+  sendCVRMotorStop(1);
+  sendCVRMotorStop(2);
+
+  // Test bitti: ekrani guncelle
+  drawCVRMotorScreen();
+}
+
 // Gesture sensör konfigürasyon komutu ($I)
 void sendGestureInit() {
   Serial1.print("$I\r\n");
   Serial1.flush();
   Serial.println("Gesture init: $I\\r\\n");
+}
+
+// $Wn komutu ile n. loadcell degerini oku (gram, ornek: $-152.28)
+static bool readLoadcellValue(int n, float &out) {
+  while (Serial1.available()) Serial1.read();
+  Serial1.print("$W");
+  Serial1.print(n);
+  Serial1.print("\r\n");
+  Serial1.flush();
+  delay(15);
+
+  char buffer[24];
+  int index = 0;
+  unsigned long startTime = millis();
+  while (millis() - startTime < READ_TIMEOUT_MS && index < (int)sizeof(buffer) - 1) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      if (c == '\r' || c == '\n') {
+        if (index > 0) {
+          buffer[index] = '\0';
+          if (buffer[0] == '$') {
+            out = atof(buffer + 1);
+            return true;
+          }
+          return false;
+        }
+      } else if (c >= 32 && c < 127) {
+        buffer[index++] = c;
+      }
+    }
+  }
+  return false;
+}
+
+void runLoadcellTest() {
+  // Butona basar basmaz ekranda TARE goster (tare suresi boyunca ekranda kalacak)
+  display.clearDisplay();
+  drawHeader("Loadcell");
+  display.setTextSize(2);
+  drawCenteredText(32, "TARE...", 2);
+  display.display();
+
+  // 1) $I gonder
+  sendGestureInit();
+  delay(500);
+
+  // 2) $X ile force_sensor_status kontrolu
+  int ntcDummy = 0, irDummy = 0;
+  if (!getSensorStatus(ntcDummy, irDummy) || force_sensor_status == 1) {
+    loadcellScreenMode = 2;
+    drawLoadcellScreen();
+    return;
+  }
+
+  // TARE komutunu gonder
+  Serial1.print("$WT\r\n");
+  Serial1.flush();
+
+  // 3-b) TARE isleminin bittigini algilamak icin, loadcell degerleri 0 etrafinda
+  // stabil olana kadar (veya max LOADCELL_TARE_WAIT_MS sureye kadar) bekle
+  unsigned long tareStart    = millis();
+  int           stableSamples = 0;
+  float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f, v4 = 0.0f;
+
+  while ((millis() - tareStart) < LOADCELL_TARE_WAIT_MS && stableSamples < 3) {
+    // 4 loadcell degerini oku (aralarinda 100ms)
+    readLoadcellValue(1, v1);
+    delay(100);
+    readLoadcellValue(2, v2);
+    delay(100);
+    readLoadcellValue(3, v3);
+    delay(100);
+    readLoadcellValue(4, v4);
+
+    bool nearZero =
+      (v1 > -LOADCELL_TARE_EPSILON_G && v1 < LOADCELL_TARE_EPSILON_G) &&
+      (v2 > -LOADCELL_TARE_EPSILON_G && v2 < LOADCELL_TARE_EPSILON_G) &&
+      (v3 > -LOADCELL_TARE_EPSILON_G && v3 < LOADCELL_TARE_EPSILON_G) &&
+      (v4 > -LOADCELL_TARE_EPSILON_G && v4 < LOADCELL_TARE_EPSILON_G);
+
+    if (nearZero) {
+      stableSamples++;
+    } else {
+      stableSamples = 0;
+    }
+
+    // Okumalar arasinda kisa bir bekleme (toplam dongu sureyi sinirlamasin)
+    delay(200);
+  }
+
+  // Son okunan degerleri global degiskenlere yaz
+  loadcell1_g = v1;
+  loadcell2_g = v2;
+  loadcell3_g = v3;
+  loadcell4_g = v4;
+
+  loadcellScreenMode = 1;
+  lastLoadcellUpdate = millis();
+  drawLoadcellScreen();
 }
 
 // Intake fan komutlarini gonder
@@ -1537,136 +1811,49 @@ void updateMenu() {
       drawExhaustFanScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_RGB_LED) {
-      if (!rgbMode) {
-        // Parametre secimi modu: H, S, V, Cikis arasinda gez
-        rgbParamSelection += diff;
-        if (rgbParamSelection < 0) rgbParamSelection = 3;
-        if (rgbParamSelection > 3) rgbParamSelection = 0;
-        drawRGBLedScreen();
-        screenNeedsUpdate = false;
-      } else {
-        // Deger ayarlama modu: secili parametrenin degerini ayarla
-        if (rgbSelectedParam == 0) {
-          // Hue: 0-360 arasi, her adimda 10 artir/azalt
-          rgbHue += diff * 10;
-          if (rgbHue < 0) rgbHue = 0;
-          if (rgbHue > 360) rgbHue = 360;
-        } else if (rgbSelectedParam == 1) {
-          // Saturation: 0-100 arasi, her adimda 10 artir/azalt
-          rgbSaturation += diff * 10;
-          if (rgbSaturation < 0) rgbSaturation = 0;
-          if (rgbSaturation > 100) rgbSaturation = 100;
-        } else if (rgbSelectedParam == 2) {
-          // Value: 0-100 arasi, her adimda 10 artir/azalt
-          rgbValue += diff * 10;
-          if (rgbValue < 0) rgbValue = 0;
-          if (rgbValue > 100) rgbValue = 100;
-        }
-        // Encoder her cevrildiginde otomatik komut gonder
-        sendRGBLedCommand();
-        drawRGBLedScreen();
-        screenNeedsUpdate = false;
-      }
+      // RGB LED menusu: LED Test / Cikis
+      rgbMenuSelection += diff;
+      if (rgbMenuSelection < 0) rgbMenuSelection = 1;
+      if (rgbMenuSelection > 1) rgbMenuSelection = 0;
+      drawRGBLedScreen();
+      screenNeedsUpdate = false;
     } else if (currentMenu == MENU_BRAKE_MOTOR) {
-      // BRAKE MOTOR ekraninda encoder ile ac/kapat (toggle)
-      // Encoder saga/sola donduruldugunde durumu degistir
-      if (diff > 0) {
-        // Saga donduruldu: Aktif yap
-        brakeMotorActive = true;
-      } else if (diff < 0) {
-        // Sola donduruldu: Pasif yap
-        brakeMotorActive = false;
-      }
-      // Encoder her cevrildiginde otomatik komut gonder
-      sendBrakeMotorCommand(brakeMotorActive);
+      // Motor freni ekraninda: Test / Cikis secimi
+      brakeMotorSelection += diff;
+      if (brakeMotorSelection < 0) brakeMotorSelection = 1;
+      if (brakeMotorSelection > 1) brakeMotorSelection = 0;
       drawBrakeMotorScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_Z_MOTOR) {
-      // Z MOTOR ekraninda encoder ile satir secimi veya deger ayarlama
-      if (!zMotorEditMode) {
-        // Satir secimi (0-5)
-        zMotorParamSelection += diff;
-        if (zMotorParamSelection < 0) zMotorParamSelection = 5;
-        if (zMotorParamSelection > 5) zMotorParamSelection = 0;
-      } else {
-        // Deger ayarlama modu
-        if (zMotorParamSelection == 1) {
-          // Yon: 0 veya 1
-          if (diff > 0) zMotorDir = 1;
-          if (diff < 0) zMotorDir = 0;
-        } else if (zMotorParamSelection == 2) {
-          // Mesafe: 1-100000 mikrostep, her adimda 100 mikrostep
-          zMotorDistanceSteps += diff * 100;
-          if (zMotorDistanceSteps < 100) zMotorDistanceSteps = 100;
-          if (zMotorDistanceSteps > 100000) zMotorDistanceSteps = 100000;
-        } else if (zMotorParamSelection == 3) {
-          // Hiz: 100-20000 mikrostep/s, her adimda 100 mikrostep/s
-          zMotorSpeedStepsPerS += diff * 100;
-          if (zMotorSpeedStepsPerS < 100) zMotorSpeedStepsPerS = 100;
-          if (zMotorSpeedStepsPerS > 20000) zMotorSpeedStepsPerS = 20000;
-        }
-      }
+      // Z MOTOR test ekraninda: Test / Cikis secimi
+      zMotorTestSelection += diff;
+      if (zMotorTestSelection < 0) zMotorTestSelection = 1;
+      if (zMotorTestSelection > 1) zMotorTestSelection = 0;
       drawZMotorScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_Y_MOTOR) {
-      // Y MOTOR ekraninda encoder ile satir secimi veya deger ayarlama
-      if (!yMotorEditMode) {
-        // Satir secimi (0-5)
-        yMotorParamSelection += diff;
-        if (yMotorParamSelection < 0) yMotorParamSelection = 5;
-        if (yMotorParamSelection > 5) yMotorParamSelection = 0;
-      } else {
-        // Deger ayarlama modu
-        if (yMotorParamSelection == 1) {
-          // Yon: 0 veya 1
-          if (diff > 0) yMotorDir = 1;
-          if (diff < 0) yMotorDir = 0;
-        } else if (yMotorParamSelection == 2) {
-          // Mesafe: 1-100000 mikrostep, her adimda 100 mikrostep
-          yMotorDistanceSteps += diff * 100;
-          if (yMotorDistanceSteps < 100) yMotorDistanceSteps = 100;
-          if (yMotorDistanceSteps > 100000) yMotorDistanceSteps = 100000;
-        } else if (yMotorParamSelection == 3) {
-          // Hiz: 100-20000 mikrostep/s, her adimda 100 mikrostep/s
-          yMotorSpeedStepsPerS += diff * 100;
-          if (yMotorSpeedStepsPerS < 100) yMotorSpeedStepsPerS = 100;
-          if (yMotorSpeedStepsPerS > 20000) yMotorSpeedStepsPerS = 20000;
-        }
-      }
+      // Y MOTOR test ekraninda: Test / Cikis secimi
+      yMotorTestSelection += diff;
+      if (yMotorTestSelection < 0) yMotorTestSelection = 1;
+      if (yMotorTestSelection > 1) yMotorTestSelection = 0;
       drawYMotorScreen();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_CVR_MOTOR) {
-      // CVR MOTOR ekraninda encoder ile satir secimi veya deger ayarlama
-      if (!cvrMotorEditMode) {
-        // Satir secimi (0-6)
-        cvrMotorParamSelection += diff;
-        if (cvrMotorParamSelection < 0) cvrMotorParamSelection = 6;
-        if (cvrMotorParamSelection > 6) cvrMotorParamSelection = 0;
-      } else {
-        int m = cvrMotorSelected; // 1 veya 2
-        if (cvrMotorParamSelection == 0) {
-          // Motor secimi: 1 <-> 2
-          if (diff != 0) {
-            cvrMotorSelected = (cvrMotorSelected == 1) ? 2 : 1;
-          }
-        } else if (cvrMotorParamSelection == 2) {
-          // Yon: 0 veya 1
-          if (diff > 0) cvrMotorDir[m] = 1;
-          if (diff < 0) cvrMotorDir[m] = 0;
-        } else if (cvrMotorParamSelection == 3) {
-          // Mesafe: 1-100000 mikrostep, her adimda 100 mikrostep
-          cvrMotorDistanceSteps[m] += diff * 100;
-          if (cvrMotorDistanceSteps[m] < 100) cvrMotorDistanceSteps[m] = 100;
-          if (cvrMotorDistanceSteps[m] > 100000) cvrMotorDistanceSteps[m] = 100000;
-        } else if (cvrMotorParamSelection == 4) {
-          // Hiz: 100-20000 mikrostep/s, her adimda 100 mikrostep/s
-          cvrMotorSpeedStepsPerS[m] += diff * 100;
-          if (cvrMotorSpeedStepsPerS[m] < 100) cvrMotorSpeedStepsPerS[m] = 100;
-          if (cvrMotorSpeedStepsPerS[m] > 20000) cvrMotorSpeedStepsPerS[m] = 20000;
-        }
-      }
+      // CVR 1-2 MOTOR test ekraninda: Test / Cikis secimi
+      cvrMotorTestSelection += diff;
+      if (cvrMotorTestSelection < 0) cvrMotorTestSelection = 1;
+      if (cvrMotorTestSelection > 1) cvrMotorTestSelection = 0;
       drawCVRMotorScreen();
       screenNeedsUpdate = false;
+    } else if (currentMenu == MENU_LOADCELL) {
+      // Loadcell ekraninda: sadece menu modunda encoder ile secim
+      if (loadcellScreenMode == 0) {
+        loadcellSelection += diff;
+        if (loadcellSelection < 0) loadcellSelection = 1;
+        if (loadcellSelection > 1) loadcellSelection = 0;
+        drawLoadcellScreen();
+        screenNeedsUpdate = false;
+      }
     } else if (currentMenu == MENU_PROJEKSIYON) {
       // Projeksiyon ekraninda: menu secimi veya akim ayarlama
       if (projectorEditMode && projectorSelection == 1) {
@@ -1819,7 +2006,7 @@ void updateMenu() {
         // Varsayilan Z motor parametreleri
         zMotorEnabled = false;
         zMotorDir = 1;
-        zMotorDistanceSteps = 1600;   // 1 tur
+        zMotorDistanceSteps = Z_MOTOR_TURN_STEPS;   // 1 tur (Z icin kalibre)
         zMotorSpeedStepsPerS = 1600;  // 1 tur/s
         zMotorParamSelection = 0;
         zMotorEditMode = false;
@@ -1857,6 +2044,12 @@ void updateMenu() {
         lastEncoderPos = 0;
         drawCVRMotorScreen();
       } else if (menuSelection == 14) {
+        currentMenu = MENU_LOADCELL;
+        loadcellSelection = 0;
+        encoderPos = 0;
+        lastEncoderPos = 0;
+        drawLoadcellScreen();
+      } else if (menuSelection == 15) {
         currentMenu = MENU_PROJEKSIYON;
         projeksiyonLedOn = false;
         projeksiyonAkim = 512;
@@ -1935,25 +2128,14 @@ void updateMenu() {
       currentMenu = MENU_MAIN;
       drawMenu();
     } else if (currentMenu == MENU_RGB_LED) {
-      if (!rgbMode) {
-        // Parametre secimi modunda: secimi yap ve deger ayarlama moduna gec
-        if (rgbParamSelection == 3) {
-          // Cikis secildi: ana menuye don
-          currentMenu = MENU_MAIN;
-          drawMenu();
-        } else {
-          // H, S veya V secildi: deger ayarlama moduna gec
-          rgbSelectedParam = rgbParamSelection;
-          rgbMode = true;
-          rgbCommandSent = false;
-          encoderPos = 0; // Encoder pozisyonunu sifirla
-          lastEncoderPos = 0;
-          drawRGBLedScreen();
-        }
-      } else {
-        // Deger ayarlama modunda: parametre secimi moduna don
-        rgbMode = false;
-        drawRGBLedScreen();
+      // RGB LED menusu: LED Test veya Cikis
+      if (rgbMenuSelection == 0) {
+        // LED test akisi
+        runRGBLedTest();
+      } else if (rgbMenuSelection == 1) {
+        // Cikis: ana menuye don
+        currentMenu = MENU_MAIN;
+        drawMenu();
       }
     } else if (currentMenu == MENU_GESTURE) {
       // Gesture menusu: Test / Cikis
@@ -2021,127 +2203,42 @@ void updateMenu() {
       currentMenu = MENU_MAIN;
       drawMenu();
     } else if (currentMenu == MENU_BRAKE_MOTOR) {
-      // Butona basinca ana menuye don
-      currentMenu = MENU_MAIN;
-      drawMenu();
-    } else if (currentMenu == MENU_Z_MOTOR) {
-      // Z Motor ekraninda buton davranisi
-      if (!zMotorEditMode) {
-        // Satir secimi modunda
-        if (zMotorParamSelection == 0) {
-          // Durum: enable/disable
-          zMotorEnabled = !zMotorEnabled;
-          if (!zMotorEnabled) {
-            // Devre disi alirken once durdur, sonra disable
-            sendZMotorStop();
-          }
-          sendZMotorEnable(zMotorEnabled);
-          drawZMotorScreen();
-        } else if (zMotorParamSelection == 1 ||
-                   zMotorParamSelection == 2 ||
-                   zMotorParamSelection == 3) {
-          // Yon / Mesafe / Hiz icin deger ayarlama moduna gec
-          zMotorEditMode = true;
-          drawZMotorScreen();
-        } else if (zMotorParamSelection == 4) {
-          // Hareket: enable degilse once enable, sonra hareket komutu
-          if (!zMotorEnabled) {
-            zMotorEnabled = true;
-            sendZMotorEnable(true);
-          }
-          // STM32 tarafinin enable komutunu isleyebilmesi icin kisa bekleme
-          delay(100); // 100ms
-          sendZMotorMove();
-          drawZMotorScreen();
-        } else if (zMotorParamSelection == 5) {
-          // Geri: ana menuye don
-          currentMenu = MENU_MAIN;
-          drawMenu();
-        }
+      // Motor freni ekraninda: Test veya Cikis
+      if (brakeMotorSelection == 0) {
+        runBrakeMotorTest();
       } else {
-        // Deger ayarlama modundan cik
-        zMotorEditMode = false;
-        drawZMotorScreen();
+        currentMenu = MENU_MAIN;
+        drawMenu();
+      }
+    } else if (currentMenu == MENU_Z_MOTOR) {
+      // Z Motor test ekraninda: Test / Cikis
+      if (zMotorTestSelection == 0) {
+        // TEST akisi
+        runZMotorTest();
+      } else if (zMotorTestSelection == 1) {
+        // Geri: ana menuye don
+        currentMenu = MENU_MAIN;
+        drawMenu();
       }
     } else if (currentMenu == MENU_Y_MOTOR) {
-      // Y Motor ekraninda buton davranisi
-      if (!yMotorEditMode) {
-        // Satir secimi modunda
-        if (yMotorParamSelection == 0) {
-          // Durum: enable/disable
-          yMotorEnabled = !yMotorEnabled;
-          if (!yMotorEnabled) {
-            // Devre disi alirken once stop, sonra disable
-            sendYMotorStop();
-          }
-          sendYMotorEnable(yMotorEnabled);
-          drawYMotorScreen();
-        } else if (yMotorParamSelection == 1 ||
-                   yMotorParamSelection == 2 ||
-                   yMotorParamSelection == 3) {
-          // Yon / Mesafe / Hiz icin deger ayarlama moduna gec
-          yMotorEditMode = true;
-          drawYMotorScreen();
-        } else if (yMotorParamSelection == 4) {
-          // Hareket: enable degilse once enable, sonra hareket komutu
-          if (!yMotorEnabled) {
-            yMotorEnabled = true;
-            sendYMotorEnable(true);
-          }
-          // STM32 tarafinin enable komutunu isleyebilmesi icin kisa bekleme
-          delay(100); // 100ms
-          sendYMotorMove();
-          drawYMotorScreen();
-        } else if (yMotorParamSelection == 5) {
-          // Geri: ana menuye don
-          currentMenu = MENU_MAIN;
-          drawMenu();
-        }
-      } else {
-        // Deger ayarlama modundan cik
-        yMotorEditMode = false;
-        drawYMotorScreen();
+      // Y Motor test ekraninda: Test / Cikis
+      if (yMotorTestSelection == 0) {
+        // TEST akisi
+        runYMotorTest();
+      } else if (yMotorTestSelection == 1) {
+        // Geri: ana menuye don
+        currentMenu = MENU_MAIN;
+        drawMenu();
       }
     } else if (currentMenu == MENU_CVR_MOTOR) {
-      // CVR Motor ekraninda buton davranisi
-      if (!cvrMotorEditMode) {
-        int m = cvrMotorSelected; // 1 veya 2
-        if (cvrMotorParamSelection == 0) {
-          // Motor: 1 <-> 2
-          cvrMotorSelected = (cvrMotorSelected == 1) ? 2 : 1;
-          drawCVRMotorScreen();
-        } else if (cvrMotorParamSelection == 1) {
-          // Durum: enable/disable
-          cvrMotorEnabled[m] = !cvrMotorEnabled[m];
-          if (!cvrMotorEnabled[m]) {
-            // Devre disi alirken once stop, sonra disable
-            sendCVRMotorStop(m);
-          }
-          sendCVRMotorEnable(m, cvrMotorEnabled[m]);
-          drawCVRMotorScreen();
-        } else if (cvrMotorParamSelection == 2 ||
-                   cvrMotorParamSelection == 3 ||
-                   cvrMotorParamSelection == 4) {
-          // Yon / Mesafe / Hiz icin deger ayarlama moduna gec
-          cvrMotorEditMode = true;
-          drawCVRMotorScreen();
-        } else if (cvrMotorParamSelection == 5) {
-          // Hareket: enable degilse once enable, sonra hareket komutu
-          if (!cvrMotorEnabled[m]) {
-            cvrMotorEnabled[m] = true;
-            sendCVRMotorEnable(m, true);
-          }
-          sendCVRMotorMove(m);
-          drawCVRMotorScreen();
-        } else if (cvrMotorParamSelection == 6) {
-          // Geri: ana menuye don
-          currentMenu = MENU_MAIN;
-          drawMenu();
-        }
-      } else {
-        // Deger ayarlama modundan cik
-        cvrMotorEditMode = false;
-        drawCVRMotorScreen();
+      // CVR 1-2 Motor test ekraninda: Test / Cikis
+      if (cvrMotorTestSelection == 0) {
+        // TEST akisi (iki motor ayni anda)
+        runCVRMotorTest();
+      } else if (cvrMotorTestSelection == 1) {
+        // CIKIS: ana menuye don
+        currentMenu = MENU_MAIN;
+        drawMenu();
       }
     } else if (currentMenu == MENU_PROJEKSIYON) {
       // Projeksiyon ekraninda: LED / Akim / Test / Cikis
@@ -2186,6 +2283,25 @@ void updateMenu() {
         currentMenu = MENU_MAIN;
         drawMenu();
       }
+    } else if (currentMenu == MENU_LOADCELL) {
+      // Loadcell menusu: Test Et / Cikis veya sonuc ekranlari
+      if (loadcellScreenMode == 0) {
+        // Menu modu
+        if (loadcellSelection == 0) {
+          // Test Et: $I -> 500ms -> $X -> (hata varsa HATA, yoksa tare + 4 okuma)
+          runLoadcellTest();
+        } else {
+          // Cikis: ana menuye don
+          currentMenu = MENU_MAIN;
+          drawMenu();
+        }
+      } else {
+        // SUCCESS veya HATA ekranindayken butona basinca ana menuye don
+        loadcellScreenMode = 0;
+        loadcellSelection  = 0;
+        currentMenu = MENU_MAIN;
+        drawMenu();
+      }
     } else {
       // Diger detay ekranlarindan geri don
       currentMenu = MENU_MAIN;
@@ -2217,6 +2333,7 @@ DrawScreenFunc drawScreenFunctions[] = {
   drawZMotorScreen,      // MENU_Z_MOTOR
   drawYMotorScreen,      // MENU_Y_MOTOR
   drawCVRMotorScreen,    // MENU_CVR_MOTOR
+  drawLoadcellScreen,    // MENU_LOADCELL
   drawProjeksiyonScreen  // MENU_PROJEKSIYON
 };
 
@@ -2466,6 +2583,31 @@ void loop() {
       delay(40);
     } else {
       lastSensorStatusCheck = now;
+    }
+  }
+
+  // Loadcell sonuc ekraninda 4 degeri periyodik guncelle
+  if (currentMenu == MENU_LOADCELL && loadcellScreenMode == 1) {
+    if (now - lastLoadcellUpdate >= LOADCELL_UPDATE_MS) {
+      lastLoadcellUpdate = now;
+
+      // Her yenilemede once force_sensor_status'u kontrol et
+      int ntcDummy2 = 0, irDummy2 = 0;
+      if (!getSensorStatus(ntcDummy2, irDummy2) || force_sensor_status == 1) {
+        // Loadcell sensorde hata olursa hemen HATA ekranina gec
+        loadcellScreenMode = 2;
+        drawLoadcellScreen();
+      } else {
+        // Hata yoksa 4 loadcell degerini guncelle
+        readLoadcellValue(1, loadcell1_g);
+        delay(100);
+        readLoadcellValue(2, loadcell2_g);
+        delay(100);
+        readLoadcellValue(3, loadcell3_g);
+        delay(100);
+        readLoadcellValue(4, loadcell4_g);
+        screenNeedsUpdate = true;
+      }
     }
   }
 

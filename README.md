@@ -26,7 +26,7 @@ IQC Giriş Kalite Test Kiti için **ESP32 Feather** tabanlı kontrol ve izleme a
 | **Ekran** | 128x64 monokrom OLED (I2C, SSD1306, 0x3C) |
 | **Kontrol** | Rotary encoder (döndürme + buton) |
 | **Veri kaynağı** | Tüm sensör/fan/TMC verileri STM32’den `$A` komutu ile alınır |
-| **Kontrol komutları** | Fan hızı (`$F1`, `$F2`, `$F3`), RGB LED (`$LA`), Fren motoru (`$B0`/`$B1`) |
+| **Kontrol komutları** | Fan hızı (`$F1`, `$F2`, `$F3`), RGB LED (`$LA`), Fren motoru (`$B0`/`$B1`), Loadcell (`$WT`, `$W1`–`$W4`) |
 
 ESP32, kullanıcı arayüzünü (OLED + encoder) yönetir; sensör ölçümü, fan sürme ve TMC okuma STM32 tarafında yapılır. Protokol detayı için **SERI_HABERLESME.md** kullanılır.
 
@@ -120,7 +120,10 @@ ESP32 ile STM32 arasındaki tüm iletişim **UART üzerinden metin tabanlı komu
 | `$P0` / `$P1` | ESP32 → STM32 | Projeksiyon LED OFF / ON | `$P0\r\n`, `$P1\r\n` |
 | `$PF` | ESP32 → STM32 | Projeksiyon “force OFF” (test öncesi kapatma) | Her projeksiyon testinde önce gönderilir |
 | `$PC` | ESP32 → STM32 | Projeksiyon LED akım değeri | `$PC512\r\n` (örnek) |
-| `$I`  | ESP32 → STM32 | Konfigürasyon komutu (gesture sensör + projeksiyon) | Gesture/Projeksiyon test akışında kullanılır |
+| `$I`  | ESP32 → STM32 | Konfigürasyon komutu (gesture sensör + projeksiyon + loadcell ortamı) | Gesture/Projeksiyon/Loadcell test akışında kullanılır |
+| `$X`  | ESP32 → STM32 | Status sorgusu (NTC, IR, fan error, gesture, projeksiyon, force) | Cevap: 8 alan `$v0,v1,...,v7` |
+| `$WT` | ESP32 → STM32 | Loadcell tare (sıfırlama) | Loadcell testinde butona basar basmaz TARE ekranda, sonra $WT gider |
+| `$W1`–`$W4` | ESP32 → STM32 | n. loadcell değerini oku (gram) | Cevap: `$<float>` (örn. `$-152.28`) |
 
 > Tam alan listesi ve ayrıntılı zamanlama için ayrıca `SERI_HABERLESME.md` dokümanına bakılmalıdır.
 
@@ -141,6 +144,7 @@ ESP32 ile STM32 arasındaki tüm iletişim **UART üzerinden metin tabanlı komu
 | 9 | CVR1 Ref | CVR1 TMC sağ/sol stop | – | Ana menü |
 | 10 | CVR2 Ref | CVR2 TMC sağ/sol stop | – | Ana menü |
 | 11 | BRAKE MOTOR | Fren motoru AKTIF/PASIF | Sağ = aktif ($B1), sol = pasif ($B0) | Ana menü |
+| 12 | Loadcell | 4 loadcell tare + okuma testi | Test Et / Çıkış | Alt menü: Test Et → TARE + 4 okuma; Çıkış → ana menü |
 
 Ana menüde 6 satır görünür, seçim kaydırmalıdır.
 
@@ -299,14 +303,25 @@ Projeksiyon ekranında şu satırlar bulunur:
 - **Cikis satırında (3) iken:**
   - Ana menüye dönülür.
 
-> Not: `force_sensor_status` şu an sadece seri log’da gösterilir; ileride ayrı bir test ekranı için ayrılmıştır.
+> Not: `force_sensor_status` şu an sadece seri log’da gösterilir; loadcell testinde kullanılır: 1 ise HATA, test yapılmaz.
+
+### Loadcell Test Menüsü
+
+- **Menüye girince:** Alt menü (Test Et / Çıkış) gösterilir.
+- **"Test Et" seçiliyken butona basar basmaz:**
+  1. Ekranda hemen **"TARE..."** yazılır.
+  2. `$I` gönderilir, 500 ms beklenir.
+  3. `$X` ile status kontrol edilir; `force_sensor_status == 1` ise HATA ekranı çizilir, çıkılır.
+  4. `$WT` (tare) gönderilir; 4 loadcell değeri 0 g civarında stabil olana kadar (veya max ~8 sn) `$W1`..`$W4` ile okunur.
+  5. Tare bitince son değerler ekrana yazılır (Loadcell sonuç ekranı).
+- **"Çıkış" seçiliyken butona basınca:** Ana menüye dönülür.
 
 ---
 
 ## Proje Yapısı ve Dokümantasyon
 
 ```
-EdgePro Power Test Kiti/
+IQC Giriş Kalite Test Kiti/
 ├── src/
 │   └── main.cpp              # Tüm uygulama kodu (UART, menü, OLED, encoder)
 ├── platformio.ini             # Kart: featheresp32, kütüphaneler, upload/monitor
