@@ -514,7 +514,7 @@ $X\r\n
 $WT\r\n
 ```
 
-**Açıklama:** Tüm loadcell’leri sıfırlar (tare). ESP32, butona basar basmaz ekranda "TARE..." gösterir, `$I` → 500 ms → `$X` yapar; hata yoksa `$WT` gönderir ve değerler 0 g civarında stabil olana kadar (veya max ~8 saniye) bekler, sonra ekrana 4 loadcell değerini yazar.
+**Açıklama:** Tüm loadcell’leri sıfırlar (tare). ESP32, butona basar basmaz ekranda `TARE...` gösterir, `$I` → 500 ms → `$X` yapar; ilk denemede sorun varsa bir kez daha otomatik tekrar dener. `force_sensor_status == 1` ise ekranda **Amplifier Kart Hatasi** gösterilir. Hata yoksa `$WT` gönderilir; ardından `$W1..$W4` ile tekrar tekrar okunur ve değerler önce `-15 g / +15 g` aralığına gelene kadar sonuç ekranına geçilmez.
 
 #### 3.8.3. Loadcell Değeri Okuma
 
@@ -537,11 +537,14 @@ Serial1.flush();
 ```
 
 **Loadcell test akışı (özet):**
-1. Butona basılır → ekranda hemen "TARE..." çizilir.
+1. Butona basılır → ekranda hemen `TARE...` çizilir.
 2. `$I\r\n` gönderilir, 500 ms beklenir.
-3. `$X\r\n` gönderilir; cevapta `force_sensor_status == 1` ise HATA ekranı çizilir, çıkılır.
-4. `$WT\r\n` gönderilir; 4 loadcell değeri 0 g civarında stabil olana kadar (ör. 3 ardışık okuma ±0.5 g) veya max süreye kadar tekrar `$W1`..`$W4` ile okunur.
-5. Tare bittikten sonra son değerler ekrana yazılır (Loadcell sonuç ekranı).
+3. `$X\r\n` gönderilir; ilk denemede başarısızsa sistem bir kez daha otomatik olarak `$I` → 500 ms → `$X` dener.
+4. Son durumda `force_sensor_status == 1` ise **Amplifier Kart Hatasi** ekranı gösterilir.
+5. Hata yoksa `$WT\r\n` gönderilir.
+6. Sonrasında `$W1..$W4` ile tekrar tekrar okuma yapılır; değerler `-15 g / +15 g` aralığına gelene kadar `TARE...` ekranı korunur.
+7. Sonuç ekranına geçmeden önce 5 tur daha doğrulama yapılır. Aralık dışı kalan kanallar varsa **Arizali Loadcell** ekranında `L1`, `L2 L3` gibi kanal isimleri gösterilir.
+8. Tüm kanallar uygunsa son değerler ekrana yazılır ve sonuç ekranında canlı güncelleme devam eder.
 
 ---
 
@@ -765,16 +768,19 @@ ESP32                    STM32
    - CVR2 Ref ekranında: cvr2_tmc_status_stop_r = 1, cvr2_tmc_status_stop_l = 0
 ```
 
-### Senaryo 6: Loadcell Testi (TARE + 4 Okuma)
+### Senaryo 6: Loadcell Testi (TARE + Kanal Doğrulama)
 ```
 1. Kullanıcı Loadcell menüsünde "Test Et" seçiliyken butona basar.
 2. ESP32 hemen ekranda "TARE..." gösterir.
 3. $I\r\n gönderilir, 500 ms beklenir.
-4. $X\r\n gönderilir; force_sensor_status == 1 ise HATA ekranı çizilir ve çıkılır.
-5. $WT\r\n gönderilir (tare).
-6. Döngüde $W1..$W4 ile 4 loadcell okunur; hepsi ±0.5 g içinde 3 ardışık okumada stabil olana
-   veya max LOADCELL_TARE_WAIT_MS (8 saniye) dolana kadar tekrarlanır.
-7. Tare bitince son değerler ekrana yazılır (Loadcell sonuç ekranı).
+4. $X\r\n gönderilir; ilk denemede sorun varsa sistem bir kez daha otomatik yeniden dener.
+5. force_sensor_status == 1 ise "Amplifier Kart Hatasi" ekranı gösterilir.
+6. Hata yoksa $WT\r\n gönderilir (tare).
+7. $W1..$W4 ile tekrar tekrar okuma yapılır; tüm kanallar -15 g / +15 g aralığına gelene kadar
+   ekranda "TARE..." kalır.
+8. Sonuç ekranına geçmeden önce 5 tur daha doğrulama yapılır.
+9. Aralık dışında kalan kanallar varsa "Arizali Loadcell" ekranında L1/L2/L3/L4 olarak listelenir.
+10. Tüm kanallar uygunsa loadcell sonuç ekranı açılır.
 ```
 
 ### Senaryo 7: Fren Motoru Kontrolü
@@ -941,11 +947,20 @@ Brake Motor: $B0  (Pasif)
 
 ## 12. Versiyon Bilgisi
 
-- **Protokol Versiyonu:** 2.3
-- **Son Güncelleme:** 2026-03-06
+- **Protokol Versiyonu:** 2.5
+- **Son Güncelleme:** 2026-03-11
 - **ESP32 Kart:** Adafruit HUZZAH32 Feather
 - **STM32:** (Kart modeli belirtilmeli)
-- **Yeni Özellikler (v2.3):**
+- **Yeni Özellikler (v2.5):**
+  - Fan test akışları dokümante edildi (INTAKE / EXHAUST otomatik RPM + `$X` hata kontrolü)
+  - Step motor testleri (Z, Y, CVR 1–2) sonunda motor sürücülerinin disable edilmesi eklendi (güvenlik)
+  - Encoder hassasiyeti iyileştirildi (iki tıkta bir adım)
+- **Önceki Özellikler (v2.4):**
+  - Loadcell test akışı güncellendi: ilk `$X` başarısız olursa bir kez otomatik yeniden deneme
+  - `force_sensor_status == 1` için özel hata adı: **Amplifier Kart Hatasi**
+  - Tare sonrası sonuç ekranına geçmeden önce `-15 g / +15 g` aralığında kanal doğrulama
+  - Arızalı loadcell kanallarının tek tek raporlanması (`L1`, `L2 L3` vb.)
+- **Önceki Özellikler (v2.3):**
   - Status sorgusu ($X) dokümante edildi: 8 alan (NTC, IR, fan hataları, gesture, projeksiyon, force)
   - Loadcell komutları: $I, $X, $WT (tare), $Wn (n=1..4, gram okuma)
   - Loadcell test akışı: butona basar basmaz "TARE..." gösterimi, $I → 500 ms → $X → $WT → stabil okuma → ekrana yazdırma

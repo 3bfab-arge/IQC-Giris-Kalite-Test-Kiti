@@ -1,6 +1,6 @@
 # IQC Giriş Kalite Test Kiti
 
-**Sürüm:** IQC Giriş Kalite Test Kiti v1.1.0
+**Sürüm:** IQC Giriş Kalite Test Kiti v1.3.0
 
 IQC Giriş Kalite Test Kiti için **ESP32 Feather** tabanlı kontrol ve izleme arayüzü. STM32 ile UART üzerinden haberleşir; sensör verilerini okur, fan/RGB/fren motorunu komutlar, 128x64 OLED ve rotary encoder ile menü sunar.
 
@@ -26,7 +26,7 @@ IQC Giriş Kalite Test Kiti için **ESP32 Feather** tabanlı kontrol ve izleme a
 | **Ekran** | 128x64 monokrom OLED (I2C, SSD1306, 0x3C) |
 | **Kontrol** | Rotary encoder (döndürme + buton) |
 | **Veri kaynağı** | Tüm sensör/fan/TMC verileri STM32’den `$A` komutu ile alınır |
-| **Kontrol komutları** | Fan hızı (`$F1`, `$F2`, `$F3`), RGB LED (`$LA`), Fren motoru (`$B0`/`$B1`), Loadcell (`$WT`, `$W1`–`$W4`) |
+| **Kontrol komutları** | Fan hızı (`$F1`, `$F2`, `$F3`), RGB LED (`$LA`), Fren motoru (`$B0`/`$B1`), Loadcell (`$I`, `$X`, `$WT`, `$W1`–`$W4`) |
 
 ESP32, kullanıcı arayüzünü (OLED + encoder) yönetir; sensör ölçümü, fan sürme ve TMC okuma STM32 tarafında yapılır. Protokol detayı için **SERI_HABERLESME.md** kullanılır.
 
@@ -144,7 +144,7 @@ ESP32 ile STM32 arasındaki tüm iletişim **UART üzerinden metin tabanlı komu
 | 9 | CVR1 Ref | CVR1 TMC sağ/sol stop | – | Ana menü |
 | 10 | CVR2 Ref | CVR2 TMC sağ/sol stop | – | Ana menü |
 | 11 | BRAKE MOTOR | Fren motoru AKTIF/PASIF | Sağ = aktif ($B1), sol = pasif ($B0) | Ana menü |
-| 12 | Loadcell | 4 loadcell tare + okuma testi | Test Et / Çıkış | Alt menü: Test Et → TARE + 4 okuma; Çıkış → ana menü |
+| 12 | Loadcell | 4 loadcell tare + okuma testi | Test Et / Çıkış | Alt menü: Test Et → TARE + doğrulama; Çıkış → alt menü |
 
 Ana menüde 6 satır görünür, seçim kaydırmalıdır.
 
@@ -303,7 +303,7 @@ Projeksiyon ekranında şu satırlar bulunur:
 - **Cikis satırında (3) iken:**
   - Ana menüye dönülür.
 
-> Not: `force_sensor_status` şu an sadece seri log’da gösterilir; loadcell testinde kullanılır: 1 ise HATA, test yapılmaz.
+> Not: `force_sensor_status` loadcell testinde kullanılır. `$X` cevabında 1 gelirse ekranda **Amplifier Kart Hatasi** gösterilir.
 
 ### Loadcell Test Menüsü
 
@@ -311,9 +311,12 @@ Projeksiyon ekranında şu satırlar bulunur:
 - **"Test Et" seçiliyken butona basar basmaz:**
   1. Ekranda hemen **"TARE..."** yazılır.
   2. `$I` gönderilir, 500 ms beklenir.
-  3. `$X` ile status kontrol edilir; `force_sensor_status == 1` ise HATA ekranı çizilir, çıkılır.
-  4. `$WT` (tare) gönderilir; 4 loadcell değeri 0 g civarında stabil olana kadar (veya max ~8 sn) `$W1`..`$W4` ile okunur.
-  5. Tare bitince son değerler ekrana yazılır (Loadcell sonuç ekranı).
+  3. `$X` ile status kontrol edilir. İlk denemede sorun varsa sistem bir kez daha otomatik dener; son durumda `force_sensor_status == 1` ise **Amplifier Kart Hatasi** gösterilir.
+  4. `$WT` (tare) gönderilir.
+  5. `$WT` sonrası 4 loadcell (`$W1`..`$W4`) tekrar tekrar okunur; değerler önce `-15 g / +15 g` aralığına gelene kadar **TARE...** ekranı korunur.
+  6. Sonuç ekranına geçmeden önce sistem 5 tur daha doğrulama yapar. Bu doğrulamada aralık dışı kalan kanallar varsa ekranda **Arizali Loadcell** altında örneğin `L1`, `L2 L3` gibi gösterilir.
+  7. Tüm kanallar uygunsa son değerler ekrana yazılır ve canlı güncelleme devam eder.
+- **Sonuç/Hata ekranında:** Altta `Buton: Cikis` görünür; butona basılınca loadcell alt menüsüne dönülür, `$I` tekrar gönderilir ve son değerler sıfırlanır.
 - **"Çıkış" seçiliyken butona basınca:** Ana menüye dönülür.
 
 ---

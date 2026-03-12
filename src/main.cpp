@@ -42,9 +42,16 @@
 #define IR_TEST_TIMEOUT_MS       5000  // IR testi max sure (ms), asilirsa FAIL
 #define IR_STABILITY_DELTA_C       4.0f // IR testi icin max sapma (IR gurultulu olabilir, NTC'den gevsek)
 #define IR_STEP_DELTA_C            1.0f // Iki ardil olcum arasi max fark (C)
+#define INTAKE_FAN_SPINUP_MS     5000  // Intake fan komutu sonrasi hata kontrolu icin bekleme
+#define EXHAUST_FAN_SPINUP_MS    5000  // Exhaust fan komutu sonrasi hata kontrolu icin bekleme
+#define FAN_TEST_STEP_MS          400  // Fan testinde hiz kademeleri arasi bekleme
+#define FAN_TEST_SETTLE_MS       1500  // %100'de RPM olcumu oncesi bekleme
+#define FAN_TEST_MIN_RPM       2500.0f // Test gecmek icin minimum RPM
 #define LOADCELL_UPDATE_MS         500  // Loadcell sonuc ekraninda yenileme araligi (ms)
-#define LOADCELL_TARE_WAIT_MS    8000  // TARE komutunun bitmesini beklemede max sure (ms)
-#define LOADCELL_TARE_EPSILON_G    0.5f // TARE sonrasi "0" kabul edilecek mutlak deger esigi (g)
+#define LOADCELL_TARE_WAIT_MS    7000  // $WT gonderildikten sonra makul degerler icin max bekleme suresi (ms)
+#define LOADCELL_POST_TARE_READY_G 15.0f // Sonuc ekranina gecmeden once kabul edilen max mutlak deger
+#define LOADCELL_POST_TARE_RETRY_DELAY_MS 300 // TARE sonrasi tekrar okumalar arasi bekleme
+#define LOADCELL_VALIDATE_ROUNDS     5   // Sonuc ekrani oncesi ek dogrulama turu
 
 // OLED Ekran - 128x64, I2C
 #define SCREEN_WIDTH 128
@@ -126,6 +133,12 @@ enum MenuState {
 
 MenuState currentMenu = MENU_MAIN;
 int menuSelection = 0; // menü seçimi
+enum FanTestPhase {
+  FAN_TEST_IDLE = 0,
+  FAN_TEST_RAMP_UP,
+  FAN_TEST_MEASURE,
+  FAN_TEST_RAMP_DOWN
+};
 const char* menuItems[] = {
   "IR Temp. Sensor",
   "NTC",
@@ -150,10 +163,28 @@ bool screenNeedsUpdate = true;
 // Intake Fan ayarlama degiskenleri
 int fanSpeedPercent = 0; // 0-100 arasi, %10'luk adimlarla (0, 10, 20, ..., 100)
 bool fanSpeedSent = false; // Komut gonderildi mi?
+unsigned long lastIntakeFanCommandMs = 0; // Son intake fan komut zamani
+int intakeFanSelection = 0; // 0: Test Et, 1: Cikis
+bool intakeFanTestRunning = false;
+bool intakeFanHasResult = false;
+bool intakeFanStatusSuccess = false;
+FanTestPhase intakeFanTestPhase = FAN_TEST_IDLE;
+unsigned long intakeFanPhaseStartMs = 0;
+unsigned long intakeFanLastStepMs = 0;
+char intakeFanFailLabel[24] = "";
 
 // Exhaust Fan ayarlama degiskenleri
 int exhaustFanSpeedPercent = 0; // 0-100 arasi, %10'luk adimlarla (0, 10, 20, ..., 100)
 bool exhaustFanSpeedSent = false; // Komut gonderildi mi?
+unsigned long lastExhaustFanCommandMs = 0; // Son exhaust fan komut zamani
+int exhaustFanSelection = 0; // 0: Test Et, 1: Cikis
+bool exhaustFanTestRunning = false;
+bool exhaustFanHasResult = false;
+bool exhaustFanStatusSuccess = false;
+FanTestPhase exhaustFanTestPhase = FAN_TEST_IDLE;
+unsigned long exhaustFanPhaseStartMs = 0;
+unsigned long exhaustFanLastStepMs = 0;
+char exhaustFanFailLabel[24] = "";
 
 // RGB LED ayarlama degiskenleri
 int rgbHue = 0;        // Hue: 0-360 arasi
@@ -250,6 +281,8 @@ int   cvrMotorTestSelection = 0;      // 0: Test, 1: Cikis
 // Loadcell menusu icin secim / ekran durumu
 int   loadcellSelection     = 0;      // 0: Test Et, 1: Cikis (sadece menu modunda)
 int   loadcellScreenMode    = 0;      // 0: menu, 1: Test sonucu (4 deger), 2: HATA ekrani
+int   loadcellErrorType     = 0;      // 0: genel hata, 1: amplifier kart hatasi
+int   loadcellFaultMask     = 0;      // Bit0:L1 Bit1:L2 Bit2:L3 Bit3:L4
 float loadcell1_g = 0.0f, loadcell2_g = 0.0f, loadcell3_g = 0.0f, loadcell4_g = 0.0f;  // gram
 
 
@@ -297,6 +330,10 @@ void sendCVRMotorStop(int motor);
 void sendCVRMotorMove(int motor);
 void sendIntakeFanCommand();
 void sendExhaustFanCommand();
+void startIntakeFanTest();
+void startExhaustFanTest();
+void updateIntakeFanTest();
+void updateExhaustFanTest();
 void sendRGBLedCommand();
 void sendGestureInit();
 void updateMenu();
@@ -372,12 +409,12 @@ void readSTM32Data() {
   delay(READ_DELAY_MS);
   
   // Bir satir oku (\r\n gelene kadar, timeout: READ_TIMEOUT_MS)
-  char buffer[64];
+  char buffer[96];
   int index = 0;
   unsigned long startTime = millis();
   bool lineComplete = false;
   
-  while (millis() - startTime < READ_TIMEOUT_MS && index < 63) {
+  while (millis() - startTime < READ_TIMEOUT_MS && index < (int)sizeof(buffer) - 1) {
     if (Serial1.available()) {
       char c = Serial1.read();
       if (c == '\r' || c == '\n') {
@@ -543,11 +580,9 @@ void readSTM32Data() {
       drawIRTempScreen();
     }
 
-    if (valueIndex >= 7) {
-      intake1_fan_raw = values[4] / 10.0;
-      intake2_fan_raw = values[5] / 10.0;
-      exhaust_fan_raw = values[6] / 10.0;
-    }
+    if (valueIndex >= 5) intake1_fan_raw = values[4] / 10.0;
+    if (valueIndex >= 6) intake2_fan_raw = values[5] / 10.0;
+    if (valueIndex >= 7) exhaust_fan_raw = values[6] / 10.0;
     
     if (valueIndex >= 8) {
       gesture_type = values[7];
@@ -595,9 +630,9 @@ void readSTM32Data() {
     char line[128];
     int n = snprintf(line, sizeof(line), "%s | %.1f %.1f %.1f %.1f",
                      buffer, mcu_load_raw, pcb_temp_raw, plate_temp_raw, resin_temp_raw);
-    if (valueIndex >= 7)
-      n += snprintf(line + n, sizeof(line) - n, " %.1f %.1f %.1f",
-                    intake1_fan_raw, intake2_fan_raw, exhaust_fan_raw);
+    if (valueIndex >= 5) n += snprintf(line + n, sizeof(line) - n, " %.1f", intake1_fan_raw);
+    if (valueIndex >= 6) n += snprintf(line + n, sizeof(line) - n, " %.1f", intake2_fan_raw);
+    if (valueIndex >= 7) n += snprintf(line + n, sizeof(line) - n, " %.1f", exhaust_fan_raw);
     if (valueIndex >= 8)
       n += snprintf(line + n, sizeof(line) - n, " g%d", gesture_type);
     if (valueIndex >= 9)
@@ -955,23 +990,60 @@ void drawLoadcellScreen() {
     display.setTextSize(1);
     char buf[24];
     snprintf(buf, sizeof(buf), "L1: %.2f g", loadcell1_g);
-    display.setCursor(0, 18);
+    display.setCursor(0, 16);
     display.print(buf);
     snprintf(buf, sizeof(buf), "L2: %.2f g", loadcell2_g);
-    display.setCursor(0, 28);
+    display.setCursor(0, 26);
     display.print(buf);
     snprintf(buf, sizeof(buf), "L3: %.2f g", loadcell3_g);
-    display.setCursor(0, 38);
+    display.setCursor(0, 36);
     display.print(buf);
     snprintf(buf, sizeof(buf), "L4: %.2f g", loadcell4_g);
-    display.setCursor(0, 48);
+    display.setCursor(0, 46);
     display.print(buf);
+    display.setCursor(0, 56);
+    display.print("Buton: Cikis");
   } else if (loadcellScreenMode == 2) {
     // HATA ekrani (force_sensor_status == 1 veya $X hatasi)
     drawHeader("Loadcell");
-    display.setTextSize(2);
-    // HATA yazisini ekranda ortala
-    drawCenteredText(32, "HATA", 2);
+    if (loadcellErrorType == 1) {
+      display.setTextSize(1);
+      drawCenteredText(24, "Amplifier Kart", 1);
+      drawCenteredText(38, "Hatasi", 1);
+    } else if (loadcellFaultMask != 0) {
+      char line1[24] = "";
+      char line2[24] = "";
+      bool firstLine = true;
+
+      for (int i = 0; i < 4; i++) {
+        if (loadcellFaultMask & (1 << i)) {
+          char part[8];
+          snprintf(part, sizeof(part), "L%d", i + 1);
+          if (firstLine) {
+            if (strlen(line1) > 0) strncat(line1, " ", sizeof(line1) - strlen(line1) - 1);
+            strncat(line1, part, sizeof(line1) - strlen(line1) - 1);
+            if (strlen(line1) >= 5) firstLine = false;
+          } else {
+            if (strlen(line2) > 0) strncat(line2, " ", sizeof(line2) - strlen(line2) - 1);
+            strncat(line2, part, sizeof(line2) - strlen(line2) - 1);
+          }
+        }
+      }
+
+      display.setTextSize(1);
+      drawCenteredText(18, "Arizali Loadcell", 1);
+      drawCenteredText(32, line1[0] ? line1 : "L?", 1);
+      if (line2[0]) {
+        drawCenteredText(44, line2, 1);
+      }
+    } else {
+      display.setTextSize(2);
+      // HATA yazisini ekranda ortala
+      drawCenteredText(32, "HATA", 2);
+    }
+    display.setTextSize(1);
+    display.setCursor(0, 56);
+    display.print("Buton: Cikis");
   }
 
   display.display();
@@ -1288,97 +1360,165 @@ void drawProjeksiyonScreen() {
   display.display();
 }
 
+static const char* getFanTestPhaseLabel(FanTestPhase phase) {
+  if (phase == FAN_TEST_RAMP_UP) return "YUKSEL";
+  if (phase == FAN_TEST_MEASURE) return "OLCUM";
+  if (phase == FAN_TEST_RAMP_DOWN) return "DUSUS";
+  return "BEKLEME";
+}
+
+static void setIntakeFanFailLabel(bool f1Fail, bool f2Fail) {
+  if (f1Fail && f2Fail) {
+    snprintf(intakeFanFailLabel, sizeof(intakeFanFailLabel), "F1 + F2");
+  } else if (f1Fail) {
+    snprintf(intakeFanFailLabel, sizeof(intakeFanFailLabel), "F1");
+  } else if (f2Fail) {
+    snprintf(intakeFanFailLabel, sizeof(intakeFanFailLabel), "F2");
+  } else {
+    intakeFanFailLabel[0] = '\0';
+  }
+}
+
+static void resetIntakeFanState() {
+  intakeFanSelection = 0;
+  intakeFanTestRunning = false;
+  intakeFanHasResult = false;
+  intakeFanStatusSuccess = false;
+  intakeFanTestPhase = FAN_TEST_IDLE;
+  intakeFanPhaseStartMs = 0;
+  intakeFanLastStepMs = 0;
+  intakeFanFailLabel[0] = '\0';
+  fanSpeedPercent = 0;
+  fanSpeedSent = false;
+  intake1_fan_error = 0;
+  intake2_fan_error = 0;
+  intake1_fan_raw = 0.0f;
+  intake2_fan_raw = 0.0f;
+}
+
+static void failIntakeFanTest(bool f1Fail, bool f2Fail) {
+  intakeFanTestRunning = false;
+  intakeFanHasResult = true;
+  intakeFanStatusSuccess = false;
+  intakeFanTestPhase = FAN_TEST_IDLE;
+  setIntakeFanFailLabel(f1Fail, f2Fail);
+  fanSpeedPercent = 0;
+  sendIntakeFanCommand();
+  drawIntakeFanScreen();
+}
+
+static void resetExhaustFanState() {
+  exhaustFanSelection = 0;
+  exhaustFanTestRunning = false;
+  exhaustFanHasResult = false;
+  exhaustFanStatusSuccess = false;
+  exhaustFanTestPhase = FAN_TEST_IDLE;
+  exhaustFanPhaseStartMs = 0;
+  exhaustFanLastStepMs = 0;
+  exhaustFanFailLabel[0] = '\0';
+  exhaustFanSpeedPercent = 0;
+  exhaustFanSpeedSent = false;
+  exhaust_fan_error = 0;
+  exhaust_fan_raw = 0.0f;
+}
+
+static void failExhaustFanTest(const char* label) {
+  exhaustFanTestRunning = false;
+  exhaustFanHasResult = true;
+  exhaustFanStatusSuccess = false;
+  exhaustFanTestPhase = FAN_TEST_IDLE;
+  snprintf(exhaustFanFailLabel, sizeof(exhaustFanFailLabel), "%s", label);
+  exhaustFanSpeedPercent = 0;
+  sendExhaustFanCommand();
+  drawExhaustFanScreen();
+}
+
 void drawIntakeFanScreen() {
   display.clearDisplay();
-  drawHeader("INTAKE FAN");
-  
-  // Hiz yüzdesi büyük fontla
-  display.setTextSize(2);
-  display.setCursor(0, 16);
-  display.print(fanSpeedPercent);
-  display.setTextSize(1);
-  display.print("%");
-  
-  // Progress bar
-  drawProgressBar(0, 32, 128, fanSpeedPercent);
-  
-  // Komut durumu
-  if (fanSpeedSent) {
-    display.setCursor(100, 16);
-    display.print("[OK]");
-  }
-  
-  // RPM degerleri
-  display.setTextSize(1);
-  display.setCursor(0, 42);
-  display.print("F1: ");
-  display.print(intake1_fan_raw, 1);
-  display.print(" RPM");
-  
-  display.setCursor(0, 52);
-  display.print("F2: ");
-  display.print(intake2_fan_raw, 1);
-  display.print(" RPM");
+  if (intakeFanTestRunning) {
+    drawHeader("INTAKE TEST");
+    display.setTextSize(2);
+    display.setCursor(0, 16);
+    display.print(fanSpeedPercent);
+    display.setTextSize(1);
+    display.print("%");
+    display.setCursor(78, 16);
+    display.print(getFanTestPhaseLabel(intakeFanTestPhase));
 
-  // Fan donus hatasi durumlari
-  bool f1Error = (intake1_fan_error == 1);
-  bool f2Error = (intake2_fan_error == 1);
-  // %100 gucte iken beklenen min RPM saglanmiyorsa da hata say
-  if (fanSpeedPercent == 100 && intake1_fan_raw <= 2500.0f) {
-    f1Error = true;
+    drawProgressBar(0, 32, 128, fanSpeedPercent);
+
+    display.setCursor(0, 42);
+    display.print("F1:");
+    display.print(intake1_fan_raw, 0);
+    display.print("  F2:");
+    display.print(intake2_fan_raw, 0);
+
+    display.setCursor(0, 52);
+    display.print("RPM min ");
+    display.print((int)FAN_TEST_MIN_RPM);
+  } else if (intakeFanHasResult) {
+    drawHeader("INTAKE TEST");
+    display.setTextSize(2);
+    drawCenteredText(intakeFanStatusSuccess ? 24 : 16, intakeFanStatusSuccess ? "SUCCESS" : "FAIL", 2);
+    display.setTextSize(1);
+    if (!intakeFanStatusSuccess && intakeFanFailLabel[0]) {
+      drawCenteredText(38, intakeFanFailLabel, 1);
+    }
+    display.setCursor(0, 56);
+    display.print("Buton: Menu");
+  } else {
+    drawHeader("INTAKE FAN");
+    display.setTextSize(1);
+    display.setCursor(0, 26);
+    display.print(intakeFanSelection == 0 ? ">" : " ");
+    display.print(" Test Et");
+    display.setCursor(0, 38);
+    display.print(intakeFanSelection == 1 ? ">" : " ");
+    display.print(" Cikis");
   }
-  if (fanSpeedPercent == 100 && intake2_fan_raw <= 2500.0f) {
-    f2Error = true;
-  }
-  display.setCursor(80, 42);
-  if (f1Error) {
-    display.print("HATA");
-  }
-  display.setCursor(80, 52);
-  if (f2Error) {
-    display.print("HATA");
-  }
-  
   display.display();
 }
 
 void drawExhaustFanScreen() {
   display.clearDisplay();
-  drawHeader("EXHAUST FAN");
-  
-  // Hiz yüzdesi büyük fontla
-  display.setTextSize(2);
-  display.setCursor(0, 16);
-  display.print(exhaustFanSpeedPercent);
-  display.setTextSize(1);
-  display.print("%");
-  
-  // Progress bar
-  drawProgressBar(0, 32, 128, exhaustFanSpeedPercent);
-  
-  // Komut durumu
-  if (exhaustFanSpeedSent) {
-    display.setCursor(100, 16);
-    display.print("[OK]");
-  }
-  
-  // RPM degeri
-  display.setTextSize(1);
-  display.setCursor(0, 42);
-  display.print("RPM: ");
-  display.print(exhaust_fan_raw, 1);
+  if (exhaustFanTestRunning) {
+    drawHeader("EXHAUST TEST");
+    display.setTextSize(2);
+    display.setCursor(0, 16);
+    display.print(exhaustFanSpeedPercent);
+    display.setTextSize(1);
+    display.print("%");
+    display.setCursor(78, 16);
+    display.print(getFanTestPhaseLabel(exhaustFanTestPhase));
 
-  // Fan donus hatasi durumu
-  bool exhError = (exhaust_fan_error == 1);
-  // %100 gucte iken beklenen min RPM saglanmiyorsa da hata say
-  if (exhaustFanSpeedPercent == 100 && exhaust_fan_raw <= 2500.0f) {
-    exhError = true;
+    drawProgressBar(0, 32, 128, exhaustFanSpeedPercent);
+
+    display.setCursor(0, 42);
+    display.print("RPM: ");
+    display.print(exhaust_fan_raw, 0);
+    display.setCursor(0, 52);
+    display.print("RPM min ");
+    display.print((int)FAN_TEST_MIN_RPM);
+  } else if (exhaustFanHasResult) {
+    drawHeader("EXHAUST TEST");
+    display.setTextSize(2);
+    drawCenteredText(exhaustFanStatusSuccess ? 24 : 16, exhaustFanStatusSuccess ? "SUCCESS" : "FAIL", 2);
+    display.setTextSize(1);
+    if (!exhaustFanStatusSuccess && exhaustFanFailLabel[0]) {
+      drawCenteredText(38, exhaustFanFailLabel, 1);
+    }
+    display.setCursor(0, 56);
+    display.print("Buton: Menu");
+  } else {
+    drawHeader("EXHAUST FAN");
+    display.setTextSize(1);
+    display.setCursor(0, 26);
+    display.print(exhaustFanSelection == 0 ? ">" : " ");
+    display.print(" Test Et");
+    display.setCursor(0, 38);
+    display.print(exhaustFanSelection == 1 ? ">" : " ");
+    display.print(" Cikis");
   }
-  display.setCursor(0, 52);
-  if (exhError) {
-    display.print("HATA VAR");
-  }
-  
   display.display();
 }
 
@@ -1527,6 +1667,7 @@ void runZMotorTest() {
   zMotorMoveOneTurn(0, 1600);
 
   sendZMotorStop();
+  sendZMotorEnable(false);
 
   // Test bitti: ekrani guncelle
   drawZMotorScreen();
@@ -1575,6 +1716,7 @@ void runYMotorTest() {
   yMotorMoveOneTurn(0, 1600);
 
   sendYMotorStop();
+  sendYMotorEnable(false);
 
   // Test bitti: ekrani guncelle
   drawYMotorScreen();
@@ -1623,6 +1765,10 @@ void runCVRMotorTest() {
   sendCVRMotorStop(1);
   sendCVRMotorStop(2);
 
+  // Test sonunda motorlari disable et
+  sendCVRMotorEnable(1, false);
+  sendCVRMotorEnable(2, false);
+
   // Test bitti: ekrani guncelle
   drawCVRMotorScreen();
 }
@@ -1632,6 +1778,20 @@ void sendGestureInit() {
   Serial1.print("$I\r\n");
   Serial1.flush();
   Serial.println("Gesture init: $I\\r\\n");
+}
+
+static void sendLoadcellConfig() {
+  sendGestureInit();
+  delay(500);
+}
+
+static int getLoadcellFaultMask(float v1, float v2, float v3, float v4) {
+  int faultMask = 0;
+  if (v1 < -LOADCELL_POST_TARE_READY_G || v1 > LOADCELL_POST_TARE_READY_G) faultMask |= 1 << 0;
+  if (v2 < -LOADCELL_POST_TARE_READY_G || v2 > LOADCELL_POST_TARE_READY_G) faultMask |= 1 << 1;
+  if (v3 < -LOADCELL_POST_TARE_READY_G || v3 > LOADCELL_POST_TARE_READY_G) faultMask |= 1 << 2;
+  if (v4 < -LOADCELL_POST_TARE_READY_G || v4 > LOADCELL_POST_TARE_READY_G) faultMask |= 1 << 3;
+  return faultMask;
 }
 
 // $Wn komutu ile n. loadcell degerini oku (gram, ornek: $-152.28)
@@ -1666,7 +1826,63 @@ static bool readLoadcellValue(int n, float &out) {
   return false;
 }
 
+static bool readAllLoadcellValues(float &v1, float &v2, float &v3, float &v4, int *readFaultMask = nullptr) {
+  int faultMask = 0;
+  bool allReadOk = true;
+  float tmp = 0.0f;
+
+  if (readLoadcellValue(1, tmp)) {
+    v1 = tmp;
+  } else {
+    faultMask |= 1 << 0;
+    allReadOk = false;
+  }
+  delay(100);
+
+  if (readLoadcellValue(2, tmp)) {
+    v2 = tmp;
+  } else {
+    faultMask |= 1 << 1;
+    allReadOk = false;
+  }
+  delay(100);
+
+  if (readLoadcellValue(3, tmp)) {
+    v3 = tmp;
+  } else {
+    faultMask |= 1 << 2;
+    allReadOk = false;
+  }
+  delay(100);
+
+  if (readLoadcellValue(4, tmp)) {
+    v4 = tmp;
+  } else {
+    faultMask |= 1 << 3;
+    allReadOk = false;
+  }
+
+  if (readFaultMask != nullptr) {
+    *readFaultMask = faultMask;
+  }
+
+  return allReadOk;
+}
+
+static void resetLoadcellTestState() {
+  loadcellErrorType = 0;
+  loadcellFaultMask = 0;
+  loadcell1_g = 0.0f;
+  loadcell2_g = 0.0f;
+  loadcell3_g = 0.0f;
+  loadcell4_g = 0.0f;
+  lastLoadcellUpdate = 0;
+}
+
 void runLoadcellTest() {
+  // Her yeni test sifirdan baslasin
+  resetLoadcellTestState();
+
   // Butona basar basmaz ekranda TARE goster (tare suresi boyunca ekranda kalacak)
   display.clearDisplay();
   drawHeader("Loadcell");
@@ -1674,62 +1890,111 @@ void runLoadcellTest() {
   drawCenteredText(32, "TARE...", 2);
   display.display();
 
-  // 1) $I gonder
-  sendGestureInit();
-  delay(500);
+  for (int attempt = 0; attempt < 2; attempt++) {
+    // 1) Her test baslangicinda konfig gonder
+    sendLoadcellConfig();
 
-  // 2) $X ile force_sensor_status kontrolu
-  int ntcDummy = 0, irDummy = 0;
-  if (!getSensorStatus(ntcDummy, irDummy) || force_sensor_status == 1) {
-    loadcellScreenMode = 2;
-    drawLoadcellScreen();
-    return;
-  }
-
-  // TARE komutunu gonder
-  Serial1.print("$WT\r\n");
-  Serial1.flush();
-
-  // 3-b) TARE isleminin bittigini algilamak icin, loadcell degerleri 0 etrafinda
-  // stabil olana kadar (veya max LOADCELL_TARE_WAIT_MS sureye kadar) bekle
-  unsigned long tareStart    = millis();
-  int           stableSamples = 0;
-  float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f, v4 = 0.0f;
-
-  while ((millis() - tareStart) < LOADCELL_TARE_WAIT_MS && stableSamples < 3) {
-    // 4 loadcell degerini oku (aralarinda 100ms)
-    readLoadcellValue(1, v1);
-    delay(100);
-    readLoadcellValue(2, v2);
-    delay(100);
-    readLoadcellValue(3, v3);
-    delay(100);
-    readLoadcellValue(4, v4);
-
-    bool nearZero =
-      (v1 > -LOADCELL_TARE_EPSILON_G && v1 < LOADCELL_TARE_EPSILON_G) &&
-      (v2 > -LOADCELL_TARE_EPSILON_G && v2 < LOADCELL_TARE_EPSILON_G) &&
-      (v3 > -LOADCELL_TARE_EPSILON_G && v3 < LOADCELL_TARE_EPSILON_G) &&
-      (v4 > -LOADCELL_TARE_EPSILON_G && v4 < LOADCELL_TARE_EPSILON_G);
-
-    if (nearZero) {
-      stableSamples++;
-    } else {
-      stableSamples = 0;
+    // 2) $X ile force_sensor_status kontrolu
+    int ntcDummy = 0, irDummy = 0;
+    if (!getSensorStatus(ntcDummy, irDummy) || force_sensor_status == 1) {
+      if (attempt == 0) {
+        delay(300);
+        continue;
+      }
+      loadcellErrorType = (force_sensor_status == 1) ? 1 : 0;
+      loadcellScreenMode = 2;
+      drawLoadcellScreen();
+      return;
     }
 
-    // Okumalar arasinda kisa bir bekleme (toplam dongu sureyi sinirlamasin)
-    delay(200);
+    // TARE komutunu gonder
+    Serial1.print("$WT\r\n");
+    Serial1.flush();
+
+    float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f, v4 = 0.0f;
+    bool  hasValidRead = false;
+    int   observedFaultMask = 0;
+
+    // Ilk gecici/yuksek degerler ekrana dusmesin diye, degerler makul seviyeye
+    // gelene kadar TARE... ekraninda beklemeye devam et.
+    unsigned long tareWaitStart = millis();
+    bool valuesReady = false;
+
+    while ((millis() - tareWaitStart) < LOADCELL_TARE_WAIT_MS) {
+      int readFaultMask = 0;
+      bool readOk = readAllLoadcellValues(v1, v2, v3, v4, &readFaultMask);
+      observedFaultMask |= readFaultMask;
+      if (!readOk && readFaultMask == 0) {
+        break;
+      }
+      hasValidRead = true;
+
+      valuesReady =
+        (v1 >= -LOADCELL_POST_TARE_READY_G && v1 <= LOADCELL_POST_TARE_READY_G) &&
+        (v2 >= -LOADCELL_POST_TARE_READY_G && v2 <= LOADCELL_POST_TARE_READY_G) &&
+        (v3 >= -LOADCELL_POST_TARE_READY_G && v3 <= LOADCELL_POST_TARE_READY_G) &&
+        (v4 >= -LOADCELL_POST_TARE_READY_G && v4 <= LOADCELL_POST_TARE_READY_G);
+
+      if (valuesReady) {
+        int faultMask = 0;
+
+        // Sonucu gostermeden once 5 tur daha kontrol et; TARE... ekranda kalmaya devam eder.
+        for (int round = 0; round < LOADCELL_VALIDATE_ROUNDS; round++) {
+          int readFaultMask = 0;
+          bool readOk = readAllLoadcellValues(v1, v2, v3, v4, &readFaultMask);
+          faultMask |= readFaultMask;
+          if (!readOk && readFaultMask == 0) {
+            break;
+          }
+          faultMask |= getLoadcellFaultMask(v1, v2, v3, v4);
+
+          if (round < (LOADCELL_VALIDATE_ROUNDS - 1)) {
+            delay(LOADCELL_POST_TARE_RETRY_DELAY_MS);
+          }
+        }
+
+        if (faultMask != 0) {
+          loadcellErrorType = 0;
+          loadcellFaultMask = faultMask;
+          loadcellScreenMode = 2;
+          drawLoadcellScreen();
+          return;
+        }
+
+        // Son okunan degerleri global degiskenlere yaz
+        loadcellFaultMask = 0;
+        loadcell1_g = v1;
+        loadcell2_g = v2;
+        loadcell3_g = v3;
+        loadcell4_g = v4;
+
+        loadcellScreenMode = 1;
+        lastLoadcellUpdate = millis();
+        drawLoadcellScreen();
+        return;
+      }
+
+      delay(LOADCELL_POST_TARE_RETRY_DELAY_MS);
+    }
+
+    if (hasValidRead) {
+      int faultMask = observedFaultMask | getLoadcellFaultMask(v1, v2, v3, v4);
+      if (faultMask != 0) {
+        loadcellErrorType = 0;
+        loadcellFaultMask = faultMask;
+        loadcellScreenMode = 2;
+        drawLoadcellScreen();
+        return;
+      }
+    }
+
+    if (attempt == 0) {
+      delay(300);
+    }
   }
 
-  // Son okunan degerleri global degiskenlere yaz
-  loadcell1_g = v1;
-  loadcell2_g = v2;
-  loadcell3_g = v3;
-  loadcell4_g = v4;
-
-  loadcellScreenMode = 1;
-  lastLoadcellUpdate = millis();
+  loadcellErrorType = 0;
+  loadcellScreenMode = 2;
   drawLoadcellScreen();
 }
 
@@ -1760,6 +2025,7 @@ void sendIntakeFanCommand() {
   Serial.println("\\r\\n");
   
   fanSpeedSent = true;
+  lastIntakeFanCommandMs = millis();
 }
 
 // Exhaust fan komutunu gonder
@@ -1778,12 +2044,180 @@ void sendExhaustFanCommand() {
   Serial.println("\\r\\n");
   
   exhaustFanSpeedSent = true;
+  lastExhaustFanCommandMs = millis();
+}
+
+void startIntakeFanTest() {
+  int ntcDummy = 0;
+  int irDummy  = 0;
+
+  intakeFanTestRunning = false;
+  intakeFanHasResult = false;
+  intakeFanStatusSuccess = false;
+  intakeFanFailLabel[0] = '\0';
+  intake1_fan_error = 0;
+  intake2_fan_error = 0;
+  intake1_fan_raw = 0.0f;
+  intake2_fan_raw = 0.0f;
+  fanSpeedPercent = 0;
+  sendIntakeFanCommand();
+  delay(40);
+
+  if (!getSensorStatus(ntcDummy, irDummy)) {
+    failIntakeFanTest(false, false);
+    snprintf(intakeFanFailLabel, sizeof(intakeFanFailLabel), "STATUS");
+    drawIntakeFanScreen();
+    return;
+  }
+
+  intakeFanTestRunning = true;
+  intakeFanHasResult = false;
+  intakeFanTestPhase = FAN_TEST_RAMP_UP;
+  intakeFanPhaseStartMs = millis();
+  intakeFanLastStepMs = intakeFanPhaseStartMs;
+  drawIntakeFanScreen();
+}
+
+void startExhaustFanTest() {
+  int ntcDummy = 0;
+  int irDummy  = 0;
+
+  exhaustFanTestRunning = false;
+  exhaustFanHasResult = false;
+  exhaustFanStatusSuccess = false;
+  exhaustFanFailLabel[0] = '\0';
+  exhaust_fan_error = 0;
+  exhaust_fan_raw = 0.0f;
+  exhaustFanSpeedPercent = 0;
+  sendExhaustFanCommand();
+  delay(40);
+
+  if (!getSensorStatus(ntcDummy, irDummy)) {
+    failExhaustFanTest("STATUS");
+    return;
+  }
+
+  exhaustFanTestRunning = true;
+  exhaustFanHasResult = false;
+  exhaustFanTestPhase = FAN_TEST_RAMP_UP;
+  exhaustFanPhaseStartMs = millis();
+  exhaustFanLastStepMs = exhaustFanPhaseStartMs;
+  drawExhaustFanScreen();
+}
+
+void updateIntakeFanTest() {
+  if (!intakeFanTestRunning) return;
+
+  unsigned long now = millis();
+  if (intakeFanTestPhase == FAN_TEST_RAMP_UP) {
+    if (now - intakeFanLastStepMs >= FAN_TEST_STEP_MS) {
+      intakeFanLastStepMs = now;
+      if (fanSpeedPercent < 100) {
+        fanSpeedPercent += 10;
+        if (fanSpeedPercent > 100) fanSpeedPercent = 100;
+        sendIntakeFanCommand();
+      }
+      if (fanSpeedPercent >= 100) {
+        intakeFanTestPhase = FAN_TEST_MEASURE;
+        intakeFanPhaseStartMs = now;
+      }
+      drawIntakeFanScreen();
+    }
+  } else if (intakeFanTestPhase == FAN_TEST_MEASURE) {
+    if (now - intakeFanPhaseStartMs >= FAN_TEST_SETTLE_MS) {
+      int ntcDummy = 0;
+      int irDummy  = 0;
+      bool gotStatus = getSensorStatus(ntcDummy, irDummy);
+      bool f1Fail = !gotStatus || (intake1_fan_error == 1) || (intake1_fan_raw < FAN_TEST_MIN_RPM);
+      bool f2Fail = !gotStatus || (intake2_fan_error == 1) || (intake2_fan_raw < FAN_TEST_MIN_RPM);
+      if (f1Fail || f2Fail) {
+        failIntakeFanTest(f1Fail, f2Fail);
+        if (!gotStatus) snprintf(intakeFanFailLabel, sizeof(intakeFanFailLabel), "STATUS");
+      } else {
+        intakeFanTestPhase = FAN_TEST_RAMP_DOWN;
+        intakeFanLastStepMs = now;
+      }
+      drawIntakeFanScreen();
+    }
+  } else if (intakeFanTestPhase == FAN_TEST_RAMP_DOWN) {
+    if (now - intakeFanLastStepMs >= FAN_TEST_STEP_MS) {
+      intakeFanLastStepMs = now;
+      if (fanSpeedPercent > 0) {
+        fanSpeedPercent -= 10;
+        if (fanSpeedPercent < 0) fanSpeedPercent = 0;
+        sendIntakeFanCommand();
+      }
+      if (fanSpeedPercent <= 0) {
+        intakeFanTestRunning = false;
+        intakeFanHasResult = true;
+        intakeFanStatusSuccess = true;
+        intakeFanTestPhase = FAN_TEST_IDLE;
+      }
+      drawIntakeFanScreen();
+    }
+  }
+}
+
+void updateExhaustFanTest() {
+  if (!exhaustFanTestRunning) return;
+
+  unsigned long now = millis();
+  if (exhaustFanTestPhase == FAN_TEST_RAMP_UP) {
+    if (now - exhaustFanLastStepMs >= FAN_TEST_STEP_MS) {
+      exhaustFanLastStepMs = now;
+      if (exhaustFanSpeedPercent < 100) {
+        exhaustFanSpeedPercent += 10;
+        if (exhaustFanSpeedPercent > 100) exhaustFanSpeedPercent = 100;
+        sendExhaustFanCommand();
+      }
+      if (exhaustFanSpeedPercent >= 100) {
+        exhaustFanTestPhase = FAN_TEST_MEASURE;
+        exhaustFanPhaseStartMs = now;
+      }
+      drawExhaustFanScreen();
+    }
+  } else if (exhaustFanTestPhase == FAN_TEST_MEASURE) {
+    if (now - exhaustFanPhaseStartMs >= FAN_TEST_SETTLE_MS) {
+      int ntcDummy = 0;
+      int irDummy  = 0;
+      bool gotStatus = getSensorStatus(ntcDummy, irDummy);
+      bool exhFail = !gotStatus || (exhaust_fan_error == 1) || (exhaust_fan_raw < FAN_TEST_MIN_RPM);
+      if (exhFail) {
+        failExhaustFanTest(!gotStatus ? "STATUS" : "EXHAUST");
+      } else {
+        exhaustFanTestPhase = FAN_TEST_RAMP_DOWN;
+        exhaustFanLastStepMs = now;
+      }
+      drawExhaustFanScreen();
+    }
+  } else if (exhaustFanTestPhase == FAN_TEST_RAMP_DOWN) {
+    if (now - exhaustFanLastStepMs >= FAN_TEST_STEP_MS) {
+      exhaustFanLastStepMs = now;
+      if (exhaustFanSpeedPercent > 0) {
+        exhaustFanSpeedPercent -= 10;
+        if (exhaustFanSpeedPercent < 0) exhaustFanSpeedPercent = 0;
+        sendExhaustFanCommand();
+      }
+      if (exhaustFanSpeedPercent <= 0) {
+        exhaustFanTestRunning = false;
+        exhaustFanHasResult = true;
+        exhaustFanStatusSuccess = true;
+        exhaustFanTestPhase = FAN_TEST_IDLE;
+      }
+      drawExhaustFanScreen();
+    }
+  }
 }
 
 void updateMenu() {
   // Encoder ile menü seçimi veya hız ayarlama
   if (encoderPos != lastEncoderPos) {
-    int diff = encoderPos - lastEncoderPos;
+    int rawDiff = encoderPos - lastEncoderPos;
+    if (rawDiff > -2 && rawDiff < 2) {
+      return;
+    }
+    int diff = rawDiff / 2;
+    lastEncoderPos += diff * 2;
     if (currentMenu == MENU_MAIN) {
       menuSelection += diff;
       if (menuSelection < 0) menuSelection = menuItemCount - 1;
@@ -1791,24 +2225,20 @@ void updateMenu() {
       drawMenu();
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_INTAKE_FAN) {
-      // INTAKE FAN ekraninda encoder ile hiz ayarla (%10'luk adimlarla)
-      fanSpeedPercent += diff * 10; // Her adimda %10 artir/azalt
-      if (fanSpeedPercent < 0) fanSpeedPercent = 0;
-      if (fanSpeedPercent > 100) fanSpeedPercent = 100;
-      // Encoder her cevrildiginde otomatik komut gonder
-      sendIntakeFanCommand();
-      delay(100); // Her kademe icin debounce gecikmesi
-      drawIntakeFanScreen();
+      if (!intakeFanTestRunning && !intakeFanHasResult) {
+        intakeFanSelection += diff;
+        if (intakeFanSelection < 0) intakeFanSelection = 1;
+        if (intakeFanSelection > 1) intakeFanSelection = 0;
+        drawIntakeFanScreen();
+      }
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_EXHAUST_FAN) {
-      // EXHAUST FAN ekraninda encoder ile hiz ayarla (%10'luk adimlarla)
-      exhaustFanSpeedPercent += diff * 10; // Her adimda %10 artir/azalt
-      if (exhaustFanSpeedPercent < 0) exhaustFanSpeedPercent = 0;
-      if (exhaustFanSpeedPercent > 100) exhaustFanSpeedPercent = 100;
-      // Encoder her cevrildiginde otomatik komut gonder
-      sendExhaustFanCommand();
-      delay(100); // Her kademe icin debounce gecikmesi
-      drawExhaustFanScreen();
+      if (!exhaustFanTestRunning && !exhaustFanHasResult) {
+        exhaustFanSelection += diff;
+        if (exhaustFanSelection < 0) exhaustFanSelection = 1;
+        if (exhaustFanSelection > 1) exhaustFanSelection = 0;
+        drawExhaustFanScreen();
+      }
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_RGB_LED) {
       // RGB LED menusu: LED Test / Cikis
@@ -1895,7 +2325,6 @@ void updateMenu() {
       drawGestureScreen();
       screenNeedsUpdate = false;
     }
-    lastEncoderPos = encoderPos;
   }
   
   // Buton ile seçim/geri dön
@@ -1951,15 +2380,13 @@ void updateMenu() {
         drawNTCScreen();
       } else if (menuSelection == 2) {
         currentMenu = MENU_INTAKE_FAN;
-        fanSpeedPercent = 0; // Hizi %0 ile baslat
-        fanSpeedSent = false; // Komut gonderilmedi
-        lastEncoderPos = encoderPos; // Encoder pozisyonunu koru, direkt hiz ayarlanabilsin
+        resetIntakeFanState();
+        lastEncoderPos = encoderPos;
         drawIntakeFanScreen();
       } else if (menuSelection == 3) {
         currentMenu = MENU_EXHAUST_FAN;
-        exhaustFanSpeedPercent = 0; // Hizi %0 ile baslat
-        exhaustFanSpeedSent = false; // Komut gonderilmedi
-        lastEncoderPos = encoderPos; // Encoder pozisyonunu koru, direkt hiz ayarlanabilsin
+        resetExhaustFanState();
+        lastEncoderPos = encoderPos;
         drawExhaustFanScreen();
       } else if (menuSelection == 4) {
         currentMenu = MENU_RGB_LED;
@@ -2120,13 +2547,35 @@ void updateMenu() {
       }
       screenNeedsUpdate = false;
     } else if (currentMenu == MENU_INTAKE_FAN) {
-      // Butona basinca ana menuye don
-      currentMenu = MENU_MAIN;
-      drawMenu();
+      if (intakeFanTestRunning) {
+        drawIntakeFanScreen();
+      } else if (intakeFanHasResult) {
+        resetIntakeFanState();
+        drawIntakeFanScreen();
+      } else if (intakeFanSelection == 0) {
+        startIntakeFanTest();
+      } else {
+        fanSpeedPercent = 0;
+        sendIntakeFanCommand();
+        resetIntakeFanState();
+        currentMenu = MENU_MAIN;
+        drawMenu();
+      }
     } else if (currentMenu == MENU_EXHAUST_FAN) {
-      // Butona basinca ana menuye don
-      currentMenu = MENU_MAIN;
-      drawMenu();
+      if (exhaustFanTestRunning) {
+        drawExhaustFanScreen();
+      } else if (exhaustFanHasResult) {
+        resetExhaustFanState();
+        drawExhaustFanScreen();
+      } else if (exhaustFanSelection == 0) {
+        startExhaustFanTest();
+      } else {
+        exhaustFanSpeedPercent = 0;
+        sendExhaustFanCommand();
+        resetExhaustFanState();
+        currentMenu = MENU_MAIN;
+        drawMenu();
+      }
     } else if (currentMenu == MENU_RGB_LED) {
       // RGB LED menusu: LED Test veya Cikis
       if (rgbMenuSelection == 0) {
@@ -2296,11 +2745,12 @@ void updateMenu() {
           drawMenu();
         }
       } else {
-        // SUCCESS veya HATA ekranindayken butona basinca ana menuye don
+        // SUCCESS veya HATA ekranindayken butona basinca loadcell menüsüne don
+        sendLoadcellConfig();
+        resetLoadcellTestState();
         loadcellScreenMode = 0;
         loadcellSelection  = 0;
-        currentMenu = MENU_MAIN;
-        drawMenu();
+        drawLoadcellScreen();
       }
     } else {
       // Diger detay ekranlarindan geri don
@@ -2481,6 +2931,9 @@ void loop() {
   updateMenu();
   
   unsigned long now = millis();
+
+  updateIntakeFanTest();
+  updateExhaustFanTest();
   
   // Sensör verisi: Gesture ekranindayken daha sik istek,
   // NTC/IR testi sirasinda 100ms aralikla olcum
@@ -2494,7 +2947,7 @@ void loop() {
   } else {
     readInterval = READ_INTERVAL_MS;
   }
-  if (now - lastRead >= readInterval) {
+  if (currentMenu != MENU_LOADCELL && now - lastRead >= readInterval) {
     lastRead = now;
     readSTM32Data();
     // Veri gelince ekrani hemen guncelle (gecikmesiz yazdir)
@@ -2532,41 +2985,21 @@ void loop() {
       delay(40);
       drawIRTempScreen();
     } else if (currentMenu == MENU_INTAKE_FAN) {
-      // Intake fan menüsünde $X ile fan hata durumunu da guncelle
-      int ntcDummy = 0;
-      int irDummy  = 0;
-      if (getSensorStatus(ntcDummy, irDummy)) {
-        // exhaust_fan_error, intake1_fan_error, intake2_fan_error global olarak guncellendi
-        bool f1Error = (intake1_fan_error == 1);
-        bool f2Error = (intake2_fan_error == 1);
-        if (fanSpeedPercent == 100) {
-          if (intake1_fan_raw <= 2500.0f) f1Error = true;
-          if (intake2_fan_raw <= 2500.0f) f2Error = true;
-        }
-        // Herhangi bir hata varsa intake fanlari durdur (hizi %0'a cek)
-        if ((f1Error || f2Error) && fanSpeedPercent != 0) {
-          fanSpeedPercent = 0;
-          sendIntakeFanCommand();
-        }
+      // Test kosarken UART karmasasi olusmasin diye periyodik $X sorgusunu durdur.
+      if (!intakeFanTestRunning) {
+        int ntcDummy = 0;
+        int irDummy  = 0;
+        getSensorStatus(ntcDummy, irDummy);
       }
       lastSensorStatusCheck = now;
       delay(40);
       drawIntakeFanScreen();
     } else if (currentMenu == MENU_EXHAUST_FAN) {
-      // Exhaust fan menüsünde $X ile fan hata durumunu da guncelle
-      int ntcDummy = 0;
-      int irDummy  = 0;
-      if (getSensorStatus(ntcDummy, irDummy)) {
-        // exhaust_fan_error, intake1_fan_error, intake2_fan_error global olarak guncellendi
-        bool exhError = (exhaust_fan_error == 1);
-        if (exhaustFanSpeedPercent == 100 && exhaust_fan_raw <= 2500.0f) {
-          exhError = true;
-        }
-        // Hata varsa exhaust fan'i durdur (hizi %0'a cek)
-        if (exhError && exhaustFanSpeedPercent != 0) {
-          exhaustFanSpeedPercent = 0;
-          sendExhaustFanCommand();
-        }
+      // Test kosarken UART karmasasi olusmasin diye periyodik $X sorgusunu durdur.
+      if (!exhaustFanTestRunning) {
+        int ntcDummy = 0;
+        int irDummy  = 0;
+        getSensorStatus(ntcDummy, irDummy);
       }
       lastSensorStatusCheck = now;
       delay(40);
@@ -2595,18 +3028,29 @@ void loop() {
       int ntcDummy2 = 0, irDummy2 = 0;
       if (!getSensorStatus(ntcDummy2, irDummy2) || force_sensor_status == 1) {
         // Loadcell sensorde hata olursa hemen HATA ekranina gec
+        loadcellErrorType = (force_sensor_status == 1) ? 1 : 0;
         loadcellScreenMode = 2;
         drawLoadcellScreen();
       } else {
         // Hata yoksa 4 loadcell degerini guncelle
-        readLoadcellValue(1, loadcell1_g);
-        delay(100);
-        readLoadcellValue(2, loadcell2_g);
-        delay(100);
-        readLoadcellValue(3, loadcell3_g);
-        delay(100);
-        readLoadcellValue(4, loadcell4_g);
-        screenNeedsUpdate = true;
+        float v1 = loadcell1_g;
+        float v2 = loadcell2_g;
+        float v3 = loadcell3_g;
+        float v4 = loadcell4_g;
+        int readFaultMask = 0;
+
+        if (readAllLoadcellValues(v1, v2, v3, v4, &readFaultMask)) {
+          loadcell1_g = v1;
+          loadcell2_g = v2;
+          loadcell3_g = v3;
+          loadcell4_g = v4;
+          screenNeedsUpdate = true;
+        } else {
+          loadcellErrorType = 0;
+          loadcellFaultMask = readFaultMask | getLoadcellFaultMask(v1, v2, v3, v4);
+          loadcellScreenMode = 2;
+          drawLoadcellScreen();
+        }
       }
     }
   }
